@@ -184,7 +184,7 @@ class StochasticSolverOptions:
         argument is a short-hand notation for using pre-defined d1 and d2
         functions for the corresponding stochastic processes.
 
-    distribution : string ('normal', 'poission')
+    distribution : string ('normal', 'poisson')
         The name of the distribution used for the stochastic increments.
 
     store_measurements : bool (default False)
@@ -229,17 +229,19 @@ class StochasticSolverOptions:
         self.d1 = d1
         self.d2 = d2
         self.d2_len = d2_len
-        self.dW_factors = dW_factors if dW_factors else np.ones(d2_len)
+        self.dW_factors = dW_factors# if dW_factors else np.ones(d2_len)
         self.state0 = state0
         self.times = times
         self.c_ops = c_ops
         self.sc_ops = sc_ops
         self.e_ops = e_ops
 
-        if m_ops is None:
-            self.m_ops = [[c for _ in range(d2_len)] for c in sc_ops]
-        else:
-            self.m_ops = m_ops
+        #if m_ops is None:
+        #    self.m_ops = [[c for _ in range(d2_len)] for c in sc_ops]
+        #else:
+        #    self.m_ops = m_ops
+
+        self.m_ops = m_ops
 
         self.ntraj = ntraj
         self.nsubsteps = nsubsteps
@@ -265,6 +267,62 @@ class StochasticSolverOptions:
             self.map_func = serial_map
 
         self.map_kwargs = map_kwargs if map_kwargs is not None else {}
+
+        #Does any operator depend on time?
+        self.td = False
+        if not isinstance(H,Qobj):
+            self.td = True
+        for ops in c_ops:
+            if not isinstance(ops,Qobj):
+                self.td = True
+        for ops in sc_ops:
+            if not isinstance(ops,Qobj):
+                self.td = True
+
+
+
+def make_d1d2(sso):
+    if not sso.method in [None, 'homodyne', 'heterodyne', 'photocurrent']:
+        raise Exception("The method should be one of "+\
+                            "[None, 'homodyne', 'heterodyne', 'photocurrent']")
+
+    if sso.method == 'homodyne' or sso.method is None:
+        sso.d1 = d1_rho_homodyne
+        sso.d2 = d2_rho_homodyne
+        sso.d2_len = 1
+        sso.homogeneous = True
+        sso.distribution = 'normal'
+        if not ssod.dW_factors:
+            sso.dW_factors = np.array([np.sqrt(1)])
+        if not sso.m_ops:
+            sso.m_ops = [[c + c.dag()] for c in sso.sc_ops]
+
+    elif sso.method == 'heterodyne':
+        sso.d1 = d1_rho_heterodyne
+        sso.d2 = d2_rho_heterodyne
+        sso.d2_len = 2
+        sso.homogeneous = True
+        sso.distribution = 'normal'
+        if not ssod.dW_factors:
+            sso.dW_factors = np.array([np.sqrt(2), np.sqrt(2)])
+        if not sso.m_ops:
+            sso.m_ops = [[(c + c.dag()), -1j * (c - c.dag())]
+                         for c in sso.sc_ops]
+
+    elif sso.method == 'photocurrent':
+        sso.d1 = cy_d1_rho_photocurrent
+        sso.d2 = cy_d2_rho_photocurrent
+        sso.d2_len = 1
+        sso.homogeneous = False
+        sso.distribution = 'poisson'
+        if not ssod.dW_factors:
+            sso.dW_factors = np.array([1])
+        if not sso.m_ops:
+            sso.m_ops = [[None] for c in sso.sc_ops]
+
+
+
+
 
 
 def ssesolve(H, psi0, times, sc_ops=[], e_ops=[], _safe_mode=True, **kwargs):
@@ -449,52 +507,130 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
     sso = StochasticSolverOptions(H=H, state0=rho0, times=times, c_ops=c_ops,
                                   sc_ops=sc_ops, e_ops=e_ops, **kwargs)
 
-    if (sso.d1 is None) or (sso.d2 is None):
 
-        if sso.method == 'homodyne' or sso.method is None:
-            sso.d1 = d1_rho_homodyne
-            sso.d2 = d2_rho_homodyne
-            sso.d2_len = 1
-            sso.homogeneous = True
-            sso.distribution = 'normal'
-            if "dW_factors" not in kwargs:
-                sso.dW_factors = np.array([np.sqrt(1)])
-            if "m_ops" not in kwargs:
-                sso.m_ops = [[c + c.dag()] for c in sso.sc_ops]
-
-        elif sso.method == 'heterodyne':
-            sso.d1 = d1_rho_heterodyne
-            sso.d2 = d2_rho_heterodyne
-            sso.d2_len = 2
-            sso.homogeneous = True
-            sso.distribution = 'normal'
-            if "dW_factors" not in kwargs:
-                sso.dW_factors = np.array([np.sqrt(2), np.sqrt(2)])
-            if "m_ops" not in kwargs:
-                sso.m_ops = [[(c + c.dag()), -1j * (c - c.dag())]
-                             for c in sso.sc_ops]
-
-        elif sso.method == 'photocurrent':
-            sso.d1 = cy_d1_rho_photocurrent
-            sso.d2 = cy_d2_rho_photocurrent
-            sso.d2_len = 1
-            sso.homogeneous = False
-            sso.distribution = 'poisson'
-
-            if "dW_factors" not in kwargs:
-                sso.dW_factors = np.array([1])
-            if "m_ops" not in kwargs:
-                sso.m_ops = [[None] for c in sso.sc_ops]
+    #Is any of the rhs, (d1,d2), noise supplied?
+    sso.custom = [False,False,False]
+    if sso.rhs:
+        sso.custom[0] = True
+    if sso.d1 or sso.d2:
+        if sso.d1 and sso.d2:
+            sso.custom[1] = True
         else:
-            raise Exception("Unrecognized method '%s'." % sso.method)
+            raise Exception("Must define both d1 and d2 or none of them")
+    if sso.noise or sso.generate_noise:
+        sso.custom[2] = True
 
-    if sso.distribution == 'poisson':
+    # Priority for the noire: sso.noise > sso.generate_noise > sso.distribution
+    # Make sure sso.distribution is always present and valid
+    if sso.distribution in [None, 'normal']:
+        sso.distribution = 'normal'
+        sso.homogeneous = True
+    elif sso.distribution == 'poisson':
         sso.homogeneous = False
+    else:
+        raise Exception("The distribution should be one of "+\
+                        "[None, 'normal', 'poisson']")
 
-    if sso.generate_A_ops is None:
-        sso.generate_A_ops = _generate_rho_A_ops
+    fast = not (any(sso.custom) or sso.td or sso.distribution == 'poisson')
 
-    if sso.rhs is None:
+
+    #Set the sso.rhs based on the method
+    #sso.rhs is an int for fast (cython) code
+    if sso.rhs:
+        if not sso.custom[1]:
+            make_d1d2(sso)
+        else:
+            if sso.dW_factors is None:
+                sso.dW_factors =  np.ones(d2_len)
+
+            if m_ops is None:
+                sso.m_ops = [[c for _ in range(d2_len)] for c in sc_ops]
+    elif fast:
+        if sso.solver == 'fast-euler-maruyama' and sso.method == 'homodyne':
+            sso.rhs = 10
+            sso.generate_A_ops = 10:
+
+        elif sso.solver == 'fast-milstein':
+            sso.generate_A_ops = 20
+            sso.generate_noise = 20
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = 20
+                elif len(sc_ops) == 2:
+                    sso.rhs = 21
+                else:
+                    sso.rhs = 22
+
+            elif sso.method == 'heterodyne':
+                sso.d2_len = 1
+                sso.sc_ops = []
+                for sc in iter(sc_ops):
+                    sso.sc_ops += [sc / np.sqrt(2), -1.0j * sc / np.sqrt(2)]
+                if len(sc_ops) == 1:
+                    sso.rhs = 21
+                else:
+                    sso.rhs = 22
+
+        elif sso.solver == 'milstein-imp':
+            sso.generate_A_ops = 25
+            sso.generate_noise = 20
+            if sso.args == None:
+                sso.args = {'tol':1e-6}
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = 25
+                else:
+                    raise Exception("Only one stochastic operator is supported")
+            else:
+                raise Exception("Only homodyne is available") 
+
+        elif sso.solver == 'taylor15':
+            sso.generate_A_ops = 0
+            sso.generate_noise = 30
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = 30
+                #elif len(sc_ops) == 2:
+                #    sso.rhs = _rhs_rho_taylor_15_two
+                else:
+                    raise Exception("Only one stochastic operator is supported")
+            else:
+                raise Exception("Only homodyne is available")
+
+        elif sso.solver == 'taylor15-imp':  
+            sso.generate_A_ops = 25
+            sso.generate_noise = 30
+            if sso.args == None:
+                sso.args = {'tol':1e-6}
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = 35
+                else:
+                    raise Exception("Only one stochastic operator is supported")
+            else:
+                raise Exception("Only homodyne is available")
+
+        elif sso.solver == 'pc-euler':
+            sso.generate_A_ops = 20
+            sso.generate_noise = 20 # could also work without this
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = 40
+                else:
+                    raise Exception("Only one stochastic operator is supported")
+            else:
+                raise Exception("Only homodyne is available")
+
+    if not sso.rhs:
+        if not sso.custom[1]:
+            make_d1d2(sso)
+        else:
+            if sso.dW_factors is None:
+                sso.dW_factors =  np.ones(d2_len)
+
+            if m_ops is None:
+                sso.m_ops = [[c for _ in range(d2_len)] for c in sc_ops]
+
         if sso.solver == 'euler-maruyama' or sso.solver is None:
             sso.rhs = _rhs_rho_euler_maruyama
 
@@ -590,7 +726,17 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
         else:
             raise Exception("Unrecognized solver '%s'." % sso.solver)
 
-    res = _smesolve_generic(sso, sso.options, sso.progress_bar)
+        else:
+            raise Exception("The solver should be one of "+\
+                            "[None, 'euler-maruyama', 'fast-euler-maruyama', "+\
+                            "'milstein', 'fast-milstein', 'taylor15', "+\
+                            "'milstein-imp', 'taylor15-imp', 'pc-euler']")
+
+
+    if isinstance(sso.rhs, int):
+        res = _smesolve_fast(sso, sso.options, sso.progress_bar)
+    else:
+        res = _smesolve_generic(sso, sso.options, sso.progress_bar)
 
     if e_ops_dict:
         res.expect = {e: res.expect[n]
@@ -909,6 +1055,83 @@ def _smesolve_generic(sso, options, progress_bar):
 
     # Liouvillian for the deterministic part.
     # needs to be modified for TD systems
+    sso.L = liouvillian(sso.H, sso.c_ops)#-----------------------------------------------
+
+    # pre-compute suporoperator operator combinations that are commonly needed
+    # when evaluating the RHS of stochastic master equations
+    sso.A_ops = sso.generate_A_ops(sso.sc_ops, sso.L.data, sso.dt)
+
+    # use .data instead of Qobj ?
+    sso.s_e_ops = [spre(e) for e in sso.e_ops]
+
+    if sso.m_ops:
+        sso.s_m_ops = [[spre(m) if m else None for m in m_op]
+                       for m_op in sso.m_ops]
+    else:
+        sso.s_m_ops = [[spre(c) for _ in range(sso.d2_len)]
+                       for c in sso.sc_ops]
+
+    map_kwargs = {'progress_bar': progress_bar}
+    map_kwargs.update(sso.map_kwargs)
+
+    task = _smesolve_single_trajectory
+    task_args = (sso,)
+    task_kwargs = {}
+
+    results = sso.map_func(task, list(range(sso.ntraj)),
+                           task_args, task_kwargs, **map_kwargs)
+
+    for result in results:
+        states_list, dW, m, expect, ss = result
+        data.states.append(states_list)
+        data.noise.append(dW)
+        data.measurement.append(m)
+        data.expect += expect
+        data.ss += ss
+
+    # average density matrices
+    if options.average_states and np.any(data.states):
+        data.states = [sum([data.states[mm][n] for mm in range(nt)]).unit()
+                       for n in range(len(data.times))]
+
+    # average
+    data.expect = data.expect / nt
+
+    # standard error
+    if nt > 1:
+        data.se = (data.ss - nt * (data.expect ** 2)) / (nt * (nt - 1))
+    else:
+        data.se = None
+
+    # convert complex data to real if hermitian
+    data.expect = [np.real(data.expect[n, :])
+                   if e.isherm else data.expect[n, :]
+                   for n, e in enumerate(sso.e_ops)]
+
+    return data
+
+def _smesolve_fast(sso, options, progress_bar):
+    """
+    Internal function. See smesolve.
+    """
+    if debug:
+        logger.debug(inspect.stack()[0][3])
+
+    sso.N_store = len(sso.times)
+    sso.N_substeps = sso.nsubsteps
+    sso.dt = (sso.times[1] - sso.times[0]) / sso.N_substeps
+    nt = sso.ntraj
+
+    data = Result()
+    data.solver = "smesolve"
+    data.times = sso.times
+    data.expect = np.zeros((len(sso.e_ops), sso.N_store), dtype=complex)
+    data.ss = np.zeros((len(sso.e_ops), sso.N_store), dtype=complex)
+    data.noise = []
+    data.measurement = []
+
+    # Liouvillian for the deterministic part.
+    # needs to be modified for TD systems
     sso.L = liouvillian(sso.H, sso.c_ops)
 
     # pre-compute suporoperator operator combinations that are commonly needed
@@ -964,7 +1187,6 @@ def _smesolve_generic(sso, options, progress_bar):
 
     return data
 
-
 def _smesolve_single_trajectory(n, sso):
     """
     Internal function. See smesolve.
@@ -993,16 +1215,16 @@ def _smesolve_single_trajectory(n, sso):
             dW = sso.generate_noise(len(A_ops), N_store, N_substeps,
                                     sso.d2_len, dt)
         elif sso.homogeneous:
-            if sso.distribution == 'normal':
-                dW = np.sqrt(dt) * np.random.randn(len(A_ops), N_store,
-                                                   N_substeps, d2_len)
-            else:
-                raise TypeError('Unsupported increment distribution for ' +
-                                'homogeneous process.')
+            #if sso.distribution == 'normal':
+            dW = np.sqrt(dt) * np.random.randn(len(A_ops), N_store,
+                                               N_substeps, d2_len)
+            #else:
+            #    raise TypeError('Unsupported increment distribution for ' +
+            #                    'homogeneous process.')
         else:
-            if sso.distribution != 'poisson':
-                raise TypeError('Unsupported increment distribution for ' +
-                                'inhomogeneous process.')
+            #if sso.distribution != 'poisson':
+            #    raise TypeError('Unsupported increment distribution for ' +
+            #                    'inhomogeneous process.')
 
             dW = np.zeros((len(A_ops), N_store, N_substeps, d2_len))
     else:
@@ -2008,8 +2230,7 @@ def _rhs_rho_milstein_homodyne_fast(L, rho_t, t, A, dt, ddW, d1, d2, args):
     return rho_t + drho_t
 
 
-def _rhs_rho_taylor_15_one(L, rho_t, t, A, dt, ddW, d1, d2,
-                                           args):
+def _rhs_rho_taylor_15_one(L, rho_t, t, A, dt, ddW, d1, d2, args):
     """
     strong order 1.5 Tylor scheme for homodyne detection with 1 stochastic operator
     """
