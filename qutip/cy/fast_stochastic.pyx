@@ -9,7 +9,7 @@ include "parameters.pxi"
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
-def _smesolve_single_trajectory(n, sso):
+def _cy_smesolve_fast_single_trajectory(int n, object sso):
     """
     Internal function. See smesolve.
     """
@@ -208,3 +208,158 @@ cdef _rhs_rho_milstein_homodyne_fast(complex[::1] rho_t,
     drho_t += np.dot(dW, d_vec[:-1])
 
     return rho_t + drho_t
+
+# -----------------------------------------------------------------------------
+# Taylor15 rhs functions for the stochastic master equation
+#
+cdef _rhs_rho_taylor_15_one(complex[::1] rho_t, 
+                            complex[::1] A_data,
+                            int[::1] A_ind, int[::1] A_ptr, 
+                            complex[::1] AL_data,
+                            int[::1] AL_ind, int[::1] AL_ptr, 
+                            double dt, np.ndarray[double, ndim=2] ddW):
+    """
+    strong order 1.5 Tylor scheme for homodyne detection with 1 stochastic operator
+    """
+
+    cdef np.ndarray[double, ndim=1] dW = ddW[:, 0]
+
+    #reusable operators and traces
+    cdef np.ndarray[complex, ndim=1] a = spmv_csr(AL_data, AL_ind, AL_ptr, rho_t)
+    cdef double e0 = cy_expect_rho_vec(A[0], rho_t, 1)
+    cdef np.ndarray[complex, ndim=1] b = spmv_csr(A_data, A_ind, A_ptr, rho_t) - e0 * rho_t
+    cdef double TrAb = cy_expect_rho_vec(A[0], b, 1)
+    cdef np.ndarray[complex, ndim=1] Lb = spmv_csr(A_data, A_ind, A_ptr, b) - TrAb * rho_t - e0 * b
+    cdef double TrALb = cy_expect_rho_vec(A[0], Lb, 1)
+    cdef double TrAa = cy_expect_rho_vec(A[0], a, 1)
+
+    cdef np.ndarray[complex, ndim=1] drho_t = a * dt
+    drho_t += b * dW[0]
+    drho_t += Lb * dW[1] # Milstein term
+
+    # new terms: 
+    drho_t += spmv_csr(AL_data, AL_ind, AL_ptr, b) * dW[2]
+    drho_t += (spmv_csr(A_data, A_ind, A_ptr, a) - TrAa * rho_t - e0 * a - TrAb * b) * dW[3]
+    drho_t += spmv_csr(AL_data, AL_ind, AL_ptr, a) * (0.5 * dt*dt)
+    drho_t += (spmv_csr(A_data, A_ind, A_ptr, Lb) - TrALb * rho_t - (2 * TrAb) * b - e0 * Lb) * dW[4] 
+        
+    return rho_t + drho_t
+
+#include _rhs_rho_Taylor_15_two#
+
+# -----------------------------------------------------------------------------
+# Implicit rhs functions for the stochastic master equation
+#
+cdef _rhs_rho_milstein_implicit(rho_t, A, dt, ddW, args):
+    """
+    Drift implicit Milstein (theta = 1/2, eta = 0)
+    Wang, X., Gan, S., & Wang, D. (2012). 
+    A family of fully implicit Milstein methods for stiff stochastic differential 
+    equations with multiplicative noise. 
+    BIT Numerical Mathematics, 52(3), 741–772.
+    """
+    
+    cdef np.ndarray[double, ndim=1] dW = ddW[:, 0]
+    A = A[0]
+    
+
+    #reusable operators and traces
+    a = A[-1] * rho_t * (0.5 * dt)
+    e0 = cy_expect_rho_vec(A[0], rho_t, 1)
+    b = A[0] * rho_t - e0 * rho_t
+    TrAb = cy_expect_rho_vec(A[0], b, 1)
+
+    drho_t = b * dW[0] 
+    drho_t += a
+    drho_t += (A[0] * b - TrAb * rho_t - e0 * b) * dW[1] # Milstein term
+    drho_t += rho_t
+
+    v, check = sp.linalg.bicgstab(A[-2], drho_t, x0 = drho_t + a, tol=args['tol'])
+
+    return v
+    
+cdef _rhs_rho_taylor_15_implicit(rho_t, A, dt, ddW, args):
+    """
+    Drift implicit Taylor 1.5 (alpha = 1/2, beta = doesn't matter)
+    Chaptert 12.2 Eq. (2.18) in Numerical Solution of Stochastic Differential Equations
+    By Peter E. Kloeden, Eckhard Platen
+    """
+    
+    cdef np.ndarray[double, ndim=1] dW = ddW[:, 0]
+    A = A[0]
+
+    #reusable operators and traces
+    a = A[-1] * rho_t
+    e0 = cy_expect_rho_vec(A[0], rho_t, 1)
+    b = A[0] * rho_t - e0 * rho_t
+    TrAb = cy_expect_rho_vec(A[0], b, 1)
+    Lb = A[0] * b - TrAb * rho_t - e0 * b
+    TrALb = cy_expect_rho_vec(A[0], Lb, 1)
+    TrAa = cy_expect_rho_vec(A[0], a, 1)
+
+    drho_t = b * dW[0] 
+    drho_t += Lb * dW[1] # Milstein term
+    xx0 = (drho_t + a * dt) + rho_t #starting vector for the linear solver (Milstein prediction)
+    drho_t += (0.5 * dt) * a
+
+    # new terms: 
+    drho_t += A[-1] * b * (dW[2] - 0.5*dW[0]*dt)
+    drho_t += (A[0] * a - TrAa * rho_t - e0 * a - TrAb * b) * dW[3]
+
+    drho_t += (A[0] * Lb - TrALb * rho_t - (2 * TrAb) * b - e0 * Lb) * dW[4]
+    drho_t += rho_t
+
+    v, check = sp.linalg.bicgstab(A[-2], drho_t, x0 = xx0, tol=args['tol'])
+
+    return v
+
+# -----------------------------------------------------------------------------
+# Predictor Corrector rhs functions for the stochastic master equation
+#
+cdef _rhs_rho_pred_corr_homodyne_single(rho_t, A, dt, ddW):
+    """
+    1/2 predictor-corrector scheme for homodyne detection with 1 stochastic operator
+    """
+    cdef np.ndarray[double, ndim=1] dW = ddW[:, 0]
+    
+    #predictor
+
+    d_vec = (A[0][0] * rho_t).reshape(-1, len(rho_t))
+    e = np.real(
+        d_vec[:-1].reshape(-1, A[0][1], A[0][1]).trace(axis1=1, axis2=2))
+
+    a_pred = np.copy(d_vec[-1])
+    b_pred = - e[0] * rho_t
+    b_pred += d_vec[0]
+
+    pred_rho_t = np.copy(a_pred)
+    pred_rho_t += b_pred * dW[0]
+    pred_rho_t += rho_t
+
+    a_pred -= ((d_vec[1] - e[1] * rho_t) - (2.0 * e[0]) * b_pred) * (0.5 * dt)
+    
+    #corrector
+
+    d_vec = (A[0][0] * pred_rho_t).reshape(-1, len(rho_t))
+    e = np.real(
+        d_vec[:-1].reshape(-1, A[0][1], A[0][1]).trace(axis1=1, axis2=2))
+
+    a_corr = d_vec[-1]
+    b_corr = - e[0] * pred_rho_t
+    b_corr += d_vec[0]
+
+    a_corr -= ((d_vec[1] - e[1] * pred_rho_t) - (2.0 * e[0]) * b_corr) * (0.5 * dt)
+    a_corr += a_pred
+    a_corr *= 0.5
+
+    b_corr += b_pred
+    b_corr *= 0.5 * dW[0]
+
+    corr_rho_t = a_corr
+    corr_rho_t += b_corr
+    corr_rho_t += rho_t
+
+    return corr_rho_t
+
+
+

@@ -292,7 +292,7 @@ def make_d1d2(sso):
         sso.d2_len = 1
         sso.homogeneous = True
         sso.distribution = 'normal'
-        if not ssod.dW_factors:
+        if not sso.dW_factors:
             sso.dW_factors = np.array([np.sqrt(1)])
         if not sso.m_ops:
             sso.m_ops = [[c + c.dag()] for c in sso.sc_ops]
@@ -303,7 +303,7 @@ def make_d1d2(sso):
         sso.d2_len = 2
         sso.homogeneous = True
         sso.distribution = 'normal'
-        if not ssod.dW_factors:
+        if not sso.dW_factors:
             sso.dW_factors = np.array([np.sqrt(2), np.sqrt(2)])
         if not sso.m_ops:
             sso.m_ops = [[(c + c.dag()), -1j * (c - c.dag())]
@@ -315,7 +315,7 @@ def make_d1d2(sso):
         sso.d2_len = 1
         sso.homogeneous = False
         sso.distribution = 'poisson'
-        if not ssod.dW_factors:
+        if not sso.dW_factors:
             sso.dW_factors = np.array([1])
         if not sso.m_ops:
             sso.m_ops = [[None] for c in sso.sc_ops]
@@ -530,7 +530,7 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
     else:
         if sso.dW_factors is None:
             sso.dW_factors =  np.ones(d2_len)
-        if m_ops is None:
+        if sso.m_ops is None:
             sso.m_ops = [[c for _ in range(d2_len)] for c in sc_ops]
 
 
@@ -552,24 +552,17 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
     #sso.rhs is an int for fast (cython) code
     if sso.rhs:
         #user has it own rhs
-        if not sso.custom[1]:
-            make_d1d2(sso)
-        else:
-            if sso.dW_factors is None:
-                sso.dW_factors =  np.ones(d2_len)
-
-            if m_ops is None:
-                sso.m_ops = [[c for _ in range(d2_len)] for c in sc_ops]
+        pass
 
     else:
         #
         if sso.solver == 'euler-maruyama' or sso.solver is None:
             sso.rhs = _rhs_rho_euler_maruyama
 
-        if sso.method == 'photocurrent':
+        elif sso.method == 'photocurrent':
             raise Exception("Only 'euler-maruyama' supports 'photocurrent'")
 
-        if sso.solver == 'milstein':
+        elif sso.solver == 'milstein':
             if sso.method == 'homodyne' or sso.method is None:
                 if len(sc_ops) == 1:
                     sso.rhs = _rhs_rho_milstein_homodyne_single
@@ -583,7 +576,7 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
                 for sc in iter(sc_ops):
                     sso.sc_ops += [sc / np.sqrt(2), -1.0j * sc / np.sqrt(2)]
 
-        if sso.td:
+        elif sso.td:
             raise Exception("Only 'euler-maruyama' and 'milstein' support time dependant cases")
         elif sso.custom[1]: # Custom d1, d2
             raise Exception("Only 'euler-maruyama' and 'milstein' support custom d1,d2")
@@ -594,12 +587,12 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
         if sso.solver == 'fast-euler-maruyama':
             if fast and sso.method == 'homodyne':
                 sso.rhs = 10
-                sso.generate_A_ops = 10:
+                sso.generate_A_ops = _generate_A_ops_Euler
             else:
                 raise Exception("'fast-euler-maruyama' only support homodyne")
 
         elif sso.solver == 'fast-milstein':
-            sso.generate_A_ops = 20
+            sso.generate_A_ops = _generate_A_ops_Milstein
             sso.generate_noise = 20
             if sso.method == 'homodyne' or sso.method is None:
                 if len(sc_ops) == 1:
@@ -621,7 +614,7 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
 
 
         elif sso.solver == 'milstein-imp':
-            sso.generate_A_ops = 25
+            sso.generate_A_ops = _generate_A_ops_implicit
             sso.generate_noise = 20
             if sso.args == None or 'tol' in sso.args:
                 sso.args = {'tol':1e-6}
@@ -634,7 +627,7 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
                 raise Exception("'milstein-imp' : Only homodyne is available") 
 
         elif sso.solver == 'taylor15':
-            sso.generate_A_ops = 0
+            sso.generate_A_ops = _generate_A_ops_simple
             sso.generate_noise = 30
             if sso.method == 'homodyne' or sso.method is None:
                 if len(sc_ops) == 1:
@@ -647,7 +640,7 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
                 raise Exception("'taylor15' : Only homodyne is available")
 
         elif sso.solver == 'taylor15-imp':  
-            sso.generate_A_ops = 25
+            sso.generate_A_ops = _generate_A_ops_implicit
             sso.generate_noise = 30
             if sso.args == None or 'tol' in sso.args:
                 sso.args = {'tol':1e-6}
@@ -660,7 +653,7 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
                 raise Exception("'taylor15-imp' : Only homodyne is available")
 
         elif sso.solver == 'pc-euler':
-            sso.generate_A_ops = 20
+            sso.generate_A_ops = _generate_A_ops_Milstein
             sso.generate_noise = 20 # could also work without this
             if sso.method == 'homodyne' or sso.method is None:
                 if len(sc_ops) == 1:
@@ -1085,7 +1078,7 @@ def _smesolve_fast(sso, options, progress_bar):
 
     # pre-compute suporoperator operator combinations that are commonly needed
     # when evaluating the RHS of stochastic master equations
-    sso.A_ops = sso.generate_A_ops(sso.sc_ops, sso.L.data, sso.dt)---------------------------------------
+    sso.A_ops = sso.generate_A_ops(sso.sc_ops, sso.L.data, sso.dt)
 
     # use .data instead of Qobj ?
     sso.s_e_ops = [spre(e) for e in sso.e_ops]
@@ -1788,6 +1781,72 @@ def _generate_A_ops_simple(sc, L, dt):
 
     return out1
 
+def _generate_A_ops_Euler(sc, L, dt):
+    """
+    combine precomputed operators in one long operator for the Euler method
+    """
+    A_len = len(sc)
+    out = []
+    out += [spre(c).data + spost(c.dag()).data for c in sc]
+    out += [(L + np.sum(
+        [lindblad_dissipator(c, data_only=True) for c in sc], axis=0)) * dt]
+    out1 = [[sp.vstack(out).tocsr(), sc[0].shape[0]]]
+    # the following hack is required for compatibility with old A_ops
+    out1 += [[] for n in range(A_len - 1)]
+
+    # XXX: fix this!
+    out1[0][0].indices = np.array(out1[0][0].indices, dtype=np.int32)
+    out1[0][0].indptr = np.array(out1[0][0].indptr, dtype=np.int32)
+
+    return out1
+
+def _generate_A_ops_Milstein(sc, L, dt):
+    """
+    combine precomputed operators in one long operator for the Milstein method
+    with commuting stochastic jump operators.
+    """
+    A_len = len(sc)
+    temp = [spre(c).data + spost(c.dag()).data for c in sc]
+    out = []
+    out += temp
+    out += [temp[n] * temp[n] for n in range(A_len)]
+    out += [temp[n] * temp[m] for (n, m) in np.ndindex(A_len, A_len) if n > m]
+    out += [(L + np.sum(
+        [lindblad_dissipator(c, data_only=True) for c in sc], axis=0)) * dt]
+    out1 = [[sp.vstack(out).tocsr(), sc[0].shape[0]]]
+    # the following hack is required for compatibility with old A_ops
+    out1 += [[] for n in range(A_len - 1)]
+
+    # XXX: fix this!
+    out1[0][0].indices = np.array(out1[0][0].indices, dtype=np.int32)
+    out1[0][0].indptr = np.array(out1[0][0].indptr, dtype=np.int32)
+
+    return out1
+
+def _generate_A_ops_implicit(sc, L, dt):
+    """
+    pre-compute superoperator operator combinations that are commonly needed
+    when evaluating the RHS of stochastic master equations
+    """
+
+    A_len = len(sc)
+    temp = [spre(c).data + spost(c.dag()).data for c in sc]
+    tempL = (L + np.sum([lindblad_dissipator(c, data_only=True) for c in sc], axis=0)) # Lagrangian
+
+    out = []
+    out += temp
+    out += [sp.eye(L.shape[0], format='csr') - 0.5*dt*tempL]
+    out += [tempL]
+    
+    out1 = [out]
+    # the following hack is required for compatibility with old A_ops
+    out1 += [[] for n in range(A_len - 1)]
+
+    return out1
+
+
+
+
 def _generate_noise_Milstein(sc_len, N_store, N_substeps, d2_len, dt):
     """
     generate noise terms for the fast Milstein scheme
@@ -1883,6 +1942,13 @@ def _rhs_rho_deterministic(L, rho_t, t, dt, args):
 
     return drho_t
 
+def _rhs_rho_deterministic_td(L, rho_t, t, dt, args):
+    """
+    Deterministic contribution to the density matrix change
+    """
+    drho_t = spmv(L(t), rho_t) * dt
+
+    return drho_t
 
 # -----------------------------------------------------------------------------
 # Euler-Maruyama rhs functions for the stochastic Schrodinger 
@@ -1950,7 +2016,6 @@ def _rhs_psi_platen(H, psi_t, t, A_ops, dt, dW, d1, d2, args):
 # -----------------------------------------------------------------------------
 # Euler-Maruyama rhs functions for the stochastic master equations
 #
-
 def _rhs_rho_euler_maruyama(L, rho_t, t, A_ops, dt, dW, d1, d2, args):
     """
     Euler-Maruyama rhs function for density matrix solver.
@@ -2039,22 +2104,9 @@ def _rhs_rho_milstein_homodyne(L, rho_t, t, A_ops, dt, dW, d1, d2, args):
 
     return rho_t + drho_t
 
-
-
-
-
 # -----------------------------------------------------------------------------
 # Rhs functions for the stochastic master equation for time dependant cases
 #
-
-def _rhs_rho_deterministic_td(L, rho_t, t, dt, args):
-    """
-    Deterministic contribution to the density matrix change
-    """
-    drho_t = spmv(L(t), rho_t) * dt
-
-    return drho_t
-
 def _rhs_rho_euler_maruyama_td(L, rho_t, t, A_ops, dt, dW, d1, d2, args):
     """
     Euler-Maruyama rhs function for density matrix solver.
@@ -2071,7 +2123,7 @@ def _rhs_rho_euler_maruyama_td(L, rho_t, t, A_ops, dt, dW, d1, d2, args):
 
     return rho_t + drho_t
 
-def _rhs_rho_milstein_homodyne_single(L, rho_t, t, A_ops, dt, dW, d1, d2, args):
+def _rhs_rho_milstein_homodyne_single_td(L, rho_t, t, A_ops, dt, dW, d1, d2, args):
     """
     .. note::
 
@@ -2094,7 +2146,7 @@ def _rhs_rho_milstein_homodyne_single(L, rho_t, t, A_ops, dt, dW, d1, d2, args):
                      rho_t) * (dW[0, 0] * dW[0, 0] - dt)
     return rho_t + drho_t
 
-def _rhs_rho_milstein_homodyne(L, rho_t, t, A_ops, dt, dW, d1, d2, args):
+def _rhs_rho_milstein_homodyne_td(L, rho_t, t, A_ops, dt, dW, d1, d2, args):
     """
     .. note::
 
@@ -2147,70 +2199,6 @@ def _rhs_rho_milstein_homodyne(L, rho_t, t, A_ops, dt, dW, d1, d2, args):
 # "Fast" functions for the stochastic master equation 
 #
 # Will be moved to cython
-
-
-def _generate_A_ops_Euler(sc, L, dt):
-    """
-    combine precomputed operators in one long operator for the Euler method
-    """
-    A_len = len(sc)
-    out = []
-    out += [spre(c).data + spost(c.dag()).data for c in sc]
-    out += [(L + np.sum(
-        [lindblad_dissipator(c, data_only=True) for c in sc], axis=0)) * dt]
-    out1 = [[sp.vstack(out).tocsr(), sc[0].shape[0]]]
-    # the following hack is required for compatibility with old A_ops
-    out1 += [[] for n in range(A_len - 1)]
-
-    # XXX: fix this!
-    out1[0][0].indices = np.array(out1[0][0].indices, dtype=np.int32)
-    out1[0][0].indptr = np.array(out1[0][0].indptr, dtype=np.int32)
-
-    return out1
-
-def _generate_A_ops_Milstein(sc, L, dt):
-    """
-    combine precomputed operators in one long operator for the Milstein method
-    with commuting stochastic jump operators.
-    """
-    A_len = len(sc)
-    temp = [spre(c).data + spost(c.dag()).data for c in sc]
-    out = []
-    out += temp
-    out += [temp[n] * temp[n] for n in range(A_len)]
-    out += [temp[n] * temp[m] for (n, m) in np.ndindex(A_len, A_len) if n > m]
-    out += [(L + np.sum(
-        [lindblad_dissipator(c, data_only=True) for c in sc], axis=0)) * dt]
-    out1 = [[sp.vstack(out).tocsr(), sc[0].shape[0]]]
-    # the following hack is required for compatibility with old A_ops
-    out1 += [[] for n in range(A_len - 1)]
-
-    # XXX: fix this!
-    out1[0][0].indices = np.array(out1[0][0].indices, dtype=np.int32)
-    out1[0][0].indptr = np.array(out1[0][0].indptr, dtype=np.int32)
-
-    return out1
-
-def _generate_A_ops_implicit(sc, L, dt):
-    """
-    pre-compute superoperator operator combinations that are commonly needed
-    when evaluating the RHS of stochastic master equations
-    """
-
-    A_len = len(sc)
-    temp = [spre(c).data + spost(c.dag()).data for c in sc]
-    tempL = (L + np.sum([lindblad_dissipator(c, data_only=True) for c in sc], axis=0)) # Lagrangian
-
-    out = []
-    out += temp
-    out += [sp.eye(L.shape[0], format='csr') - 0.5*dt*tempL]
-    out += [tempL]
-    
-    out1 = [out]
-    # the following hack is required for compatibility with old A_ops
-    out1 += [[] for n in range(A_len - 1)]
-
-    return out1
 
 def _generate_noise_Milstein(sc_len, N_store, N_substeps, d2_len, dt):
     """
