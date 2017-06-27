@@ -104,17 +104,16 @@ def _cy_smesolve_fast_single_trajectory(int n, object sso):
 @cython.wraparound(False)
 cdef _rhs_rho_euler_homodyne_fast(complex[::1] rho_t,
                                 complex[::1] A_data,
-                                int[::1] A_ind, int[::1] A_ptr, 
-                                int A_size, int A_len,
-                                np.ndarray[double, ndim=2] ddW):
+                                int[::1] A_ind, int[::1] A_ptr,
+                                int A_size,
+                                np.ndarray[double, ndim=1] dW):
     """
     Fast Euler-Maruyama for homodyne detection.
     """
-
-    np.ndarray[double, ndim=1] dW = ddW[:, 0]
-
-    d_vec = spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(-1, len(rho_t))
-    e = d_vec[:-1].reshape(-1, A_size, A_size).trace(axis1=1, axis2=2)
+    cdef np.ndarray[complex, ndim=2] d_vec =
+        spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(-1, len(rho_t))
+    cdef np.ndarray[double, ndim=1] e =
+        d_vec[:-1].reshape(-1, A_size, A_size).trace(axis1=1, axis2=2)
 
     drho_t = d_vec[-1]
     drho_t += np.dot(dW, d_vec[:-1])
@@ -126,16 +125,15 @@ cdef _rhs_rho_euler_homodyne_fast(complex[::1] rho_t,
 @cython.wraparound(False)
 cdef _rhs_rho_milstein_homodyne_single_fast(complex[::1] rho_t,
                                 complex[::1] A_data,
-                                int[::1] A_ind, int[::1] A_ptr, 
-                                int A_size, int A_len,
-                                np.ndarray[double, ndim=2] ddW):
+                                int[::1] A_ind, int[::1] A_ptr,
+                                int A_size,
+                                np.ndarray[double, ndim=1] dW):
     """
     Fast Milstein for homodyne detection with 1 stochastic operator
     """
-    np.ndarray[double, ndim=1] dW = np.copy(ddW[:, 0])
-
-    d_vec = spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(-1, len(rho_t))
-    e = np.real(
+    cdef np.ndarray[complex, ndim=2] _rhs_rho_milstein_homodyne_two_fastd_vec =
+        spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(-1, len(rho_t))
+    cdef np.ndarray[double, ndim=1] e = np.real(
         d_vec[:-1].reshape(-1, A_size, A_size).trace(axis1=1, axis2=2))
     e[1] -= 2.0 * e[0] * e[0]
 
@@ -152,16 +150,15 @@ cdef _rhs_rho_milstein_homodyne_single_fast(complex[::1] rho_t,
 @cython.wraparound(False)
 cdef _rhs_rho_milstein_homodyne_two_fast(complex[::1] rho_t,
                                 complex[::1] A_data,
-                                int[::1] A_ind, int[::1] A_ptr, 
-                                int A_size, int A_len,
-                                np.ndarray[double, ndim=2] ddW):
+                                int[::1] A_ind, int[::1] A_ptr,
+                                int A_size,
+                                np.ndarray[double, ndim=1] dW):
     """
     fast Milstein for homodyne detection with 2 stochastic operators
     """
-    np.ndarray[double, ndim=1] dW = np.copy(ddW[:, 0])
-
-    d_vec = spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(-1, len(rho_t))
-    e = np.real(
+    cdef np.ndarray[complex, ndim=2] d_vec =
+        spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(-1, len(rho_t))
+    cdef np.ndarray[double, ndim=1] e = np.real(
         d_vec[:-1].reshape(-1, A_size, A_size).trace(axis1=1, axis2=2))
     d_vec[-2] -= np.dot(e[:2][::-1], d_vec[:2])
 
@@ -181,17 +178,17 @@ cdef _rhs_rho_milstein_homodyne_two_fast(complex[::1] rho_t,
 @cython.wraparound(False)
 cdef _rhs_rho_milstein_homodyne_fast(complex[::1] rho_t,
                                 complex[::1] A_data,
-                                int[::1] A_ind, int[::1] A_ptr, 
+                                int[::1] A_ind, int[::1] A_ptr,
                                 int A_size, int sc_len,
-                                np.ndarray[double, ndim=2] ddW):
+                                np.ndarray[double, ndim=1] dW):
     """
     fast Milstein for homodyne detection with >2 stochastic operators
     """
-    cdef np.ndarray[double, ndim=1] dW = np.copy(ddW[:, 0])
-    sc2_len = 2 * sc_len
+    cdef int sc2_len = 2 * sc_len
 
-    d_vec = spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(-1, len(rho_t))
-    e = np.real(d_vec[:-1].reshape(
+    cdef np.ndarray[complex, ndim=2] d_vec =
+        spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(-1, len(rho_t))
+    cdef np.ndarray[double, ndim=1] e = np.real(d_vec[:-1].reshape(
         -1, A_size, A_size).trace(axis1=1, axis2=2))
     d_vec[sc2_len:-1] -= np.array(
         [e[m] * d_vec[n] + e[n] * d_vec[m]
