@@ -62,10 +62,13 @@ from qutip.superoperator import (spre, spost, mat2vec, vec2mat,
 from qutip.cy.spmatfuncs import cy_expect_psi_csr, spmv, cy_expect_rho_vec
 from qutip.cy.stochastic import (cy_d1_rho_photocurrent,
                                  cy_d2_rho_photocurrent)
+from qutip.cy.fast_stochastic import cy_smesolve_fast_single_trajectory
+
 from qutip.parallel import serial_map
 from qutip.ui.progressbar import TextProgressBar
 from qutip.solver import Options, _solver_safety_check
 from qutip.settings import debug
+from qutip.td_qobj import td_liouvillian, td_Qobj
 
 
 if debug:
@@ -442,7 +445,7 @@ def ssesolve(H, psi0, times, sc_ops=[], e_ops=[], _safe_mode=True, **kwargs):
 
 
 def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], 
-            _safe_mode=True ,**kwargs):
+            _safe_mode=True, debug=False, **kwargs):
     """
     Solve stochastic master equation. Dispatch to specific solvers
     depending on the value of the `solver` keyword argument.
@@ -557,17 +560,26 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
     else:
         #
         if sso.solver == 'euler-maruyama' or sso.solver is None:
-            sso.rhs = _rhs_rho_euler_maruyama
+            if sso.td:
+                sso.rhs = _rhs_rho_euler_maruyama_td
+            else:
+                sso.rhs = _rhs_rho_euler_maruyama
 
         elif sso.method == 'photocurrent':
             raise Exception("Only 'euler-maruyama' supports 'photocurrent'")
 
         elif sso.solver == 'milstein':
             if sso.method == 'homodyne' or sso.method is None:
-                if len(sc_ops) == 1:
-                    sso.rhs = _rhs_rho_milstein_homodyne_single
+                if sso.td:
+                    if len(sc_ops) == 1:
+                        sso.rhs = _rhs_rho_milstein_homodyne_single_td
+                    else:
+                        sso.rhs = _rhs_rho_milstein_homodyne_td
                 else:
-                    sso.rhs = _rhs_rho_milstein_homodyne
+                    if len(sc_ops) == 1:
+                        sso.rhs = _rhs_rho_milstein_homodyne_single
+                    else:
+                        sso.rhs = _rhs_rho_milstein_homodyne
 
             elif sso.method == 'heterodyne':
                 sso.rhs = _rhs_rho_milstein_homodyne
@@ -587,6 +599,13 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
         if sso.solver == 'fast-euler-maruyama':
             if fast and sso.method == 'homodyne':
                 sso.rhs = 10
+                sso.generate_A_ops = _generate_A_ops_Euler
+            else:
+                raise Exception("'fast-euler-maruyama' only support homodyne")
+
+        elif sso.solver == 'fast-euler-maruyama-2':
+            if fast and sso.method == 'homodyne':
+                sso.rhs = 11
                 sso.generate_A_ops = _generate_A_ops_Euler
             else:
                 raise Exception("'fast-euler-maruyama' only support homodyne")
@@ -663,12 +682,92 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
             else:
                 raise Exception("'pc-euler' : Only homodyne is available")
 
+        if sso.solver == 'py-fast-euler-maruyama':
+            if fast and sso.method == 'homodyne':
+                sso.rhs = _rhs_rho_euler_homodyne_fast_py
+                sso.generate_A_ops = _generate_A_ops_Euler
+            else:
+                raise Exception("'fast-euler-maruyama' only support homodyne")
+
+        elif sso.solver == 'py-fast-milstein':
+            sso.generate_A_ops = _generate_A_ops_Milstein
+            sso.generate_noise = _generate_noise_Milstein
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = _rhs_rho_milstein_homodyne_single_fast_py
+                elif len(sc_ops) == 2:
+                    sso.rhs = _rhs_rho_milstein_homodyne_two_fast_py
+                else:
+                    sso.rhs = _rhs_rho_milstein_homodyne_fast_py
+
+            elif sso.method == 'heterodyne':
+                sso.d2_len = 1
+                sso.sc_ops = []
+                for sc in iter(sc_ops):
+                    sso.sc_ops += [sc / np.sqrt(2), -1.0j * sc / np.sqrt(2)]
+                if len(sc_ops) == 1:
+                    sso.rhs = _rhs_rho_milstein_homodyne_two_fast_py
+                else:
+                    sso.rhs = _rhs_rho_milstein_homodyne_fast_py
+
+
+        elif sso.solver == 'py-milstein-imp':
+            sso.generate_A_ops = _generate_A_ops_implicit
+            sso.generate_noise = _generate_noise_Milstein
+            if sso.args == None or 'tol' in sso.args:
+                sso.args = {'tol':1e-6}
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = _rhs_rho_milstein_implicit_py
+                else:
+                    raise Exception("'milstein-imp' : Only one stochastic operator is supported")
+            else:
+                raise Exception("'milstein-imp' : Only homodyne is available") 
+
+        elif sso.solver == 'py-taylor15':
+            sso.generate_A_ops = _generate_A_ops_simple
+            sso.generate_noise = _generate_noise_Taylor_15
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = _rhs_rho_taylor_15_one_py
+                #elif len(sc_ops) == 2:
+                #    sso.rhs = _rhs_rho_taylor_15_two
+                else:
+                    raise Exception("'taylor15' : Only one stochastic operator is supported")
+            else:
+                raise Exception("'taylor15' : Only homodyne is available")
+
+        elif sso.solver == 'py-taylor15-imp':  
+            sso.generate_A_ops = _generate_A_ops_implicit
+            sso.generate_noise = _generate_noise_Taylor_15
+            if sso.args == None or 'tol' in sso.args:
+                sso.args = {'tol':1e-6}
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = _rhs_rho_taylor_15_implicit_py
+                else:
+                    raise Exception("'taylor15-imp' : Only one stochastic operator is supported")
+            else:
+                raise Exception("'taylor15-imp' : Only homodyne is available")
+
+        elif sso.solver == 'py-pc-euler':
+            sso.generate_A_ops = _generate_A_ops_Milstein
+            sso.generate_noise = _generate_noise_Milstein # could also work without this
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = _rhs_rho_pred_corr_homodyne_single_py
+                else:
+                    raise Exception("'pc-euler' : Only one stochastic operator is supported")
+            else:
+                raise Exception("'pc-euler' : Only homodyne is available")
         if sso.rhs is None:
             raise Exception("The solver should be one of "+\
                             "[None, 'euler-maruyama', 'fast-euler-maruyama', "+\
                             "'milstein', 'fast-milstein', 'taylor15', "+\
                             "'milstein-imp', 'taylor15-imp', 'pc-euler']")
 
+    if debug:
+        return sso
     if isinstance(sso.rhs, int):
         res = _smesolve_fast(sso, sso.options, sso.progress_bar)
     else:
@@ -997,11 +1096,11 @@ def _smesolve_generic(sso, options, progress_bar):
         # pre-compute suporoperator operator combinations that are commonly needed
         # when evaluating the RHS of stochastic master equations
         sso.A_ops = sso.generate_A_ops(sso.sc_ops, sso.L.data, sso.dt)
-        task = _smesolve_single_trajectory_td
+        task = _smesolve_single_trajectory
     else:
         sso.L = td_liouvillian(sso.H, sso.c_ops)
         sso.A_ops = sso.generate_A_ops(sso.sc_ops, sso.L(0).data, sso.dt)
-        task = _smesolve_single_trajectory
+        task = _smesolve_single_trajectory_td
 
 
     # use .data instead of Qobj ?
@@ -1093,7 +1192,7 @@ def _smesolve_fast(sso, options, progress_bar):
     map_kwargs = {'progress_bar': progress_bar}
     map_kwargs.update(sso.map_kwargs)
 
-    task = _cy_smesolve_fast_single_trajectory
+    task = cy_smesolve_fast_single_trajectory
     task_args = (sso,)
     task_kwargs = {}
 
@@ -1226,7 +1325,7 @@ def _smesolve_single_trajectory_td(n, sso):
     times = sso.times
     d1, d2 = sso.d1, sso.d2
     d2_len = sso.d2_len
-    L_data = sso.L.data
+    L = sso.L
     N_substeps = sso.N_substeps
     N_store = sso.N_store
     A_ops = sso.A_ops
@@ -1289,7 +1388,7 @@ def _smesolve_single_trajectory_td(n, sso):
                     else:
                         dW[a_idx, t_idx, j, :] = np.zeros(d2_len)
 
-            rho_t = sso.rhs(L_data, rho_t, t + dt * j,
+            rho_t = sso.rhs(L, rho_t, t + dt * j,
                             A_ops, dt, dW[:, t_idx, j, :], d1, d2, sso.args)
 
         if sso.store_measurement:
@@ -1946,7 +2045,7 @@ def _rhs_rho_deterministic_td(L, rho_t, t, dt, args):
     """
     Deterministic contribution to the density matrix change
     """
-    drho_t = spmv(L(t), rho_t) * dt
+    drho_t = spmv(L(t).data, rho_t) * dt
 
     return drho_t
 
@@ -2247,7 +2346,7 @@ def _generate_noise_Taylor_15(sc_len, N_store, N_substeps, d2_len, dt):
 
 
 
-def _rhs_rho_euler_homodyne_fast(L, rho_t, t, A, dt, ddW, d1, d2, args):
+def _rhs_rho_euler_homodyne_fast_py(L, rho_t, t, A, dt, ddW, d1, d2, args):
     """
     Fast Euler-Maruyama for homodyne detection.
     """
@@ -2262,7 +2361,7 @@ def _rhs_rho_euler_homodyne_fast(L, rho_t, t, A, dt, ddW, d1, d2, args):
     drho_t += (1.0 - np.inner(np.real(e), dW)) * rho_t
     return drho_t
 
-def _rhs_rho_milstein_homodyne_single_fast(L, rho_t, t, A, dt, ddW, d1, d2, args):
+def _rhs_rho_milstein_homodyne_single_fast_py(L, rho_t, t, A, dt, ddW, d1, d2, args):
     """
     fast Milstein for homodyne detection with 1 stochastic operator
     """
@@ -2282,7 +2381,7 @@ def _rhs_rho_milstein_homodyne_single_fast(L, rho_t, t, A, dt, ddW, d1, d2, args
 
     return rho_t + drho_t
 
-def _rhs_rho_milstein_homodyne_two_fast(L, rho_t, t, A, dt, ddW, d1, d2, args):
+def _rhs_rho_milstein_homodyne_two_fast_py(L, rho_t, t, A, dt, ddW, d1, d2, args):
     """
     fast Milstein for homodyne detection with 2 stochastic operators
     """
@@ -2304,7 +2403,7 @@ def _rhs_rho_milstein_homodyne_two_fast(L, rho_t, t, A, dt, ddW, d1, d2, args):
 
     return rho_t + drho_t
 
-def _rhs_rho_milstein_homodyne_fast(L, rho_t, t, A, dt, ddW, d1, d2, args):
+def _rhs_rho_milstein_homodyne_fast_py(L, rho_t, t, A, dt, ddW, d1, d2, args):
     """
     fast Milstein for homodyne detection with >2 stochastic operators
     """
@@ -2334,7 +2433,7 @@ def _rhs_rho_milstein_homodyne_fast(L, rho_t, t, A, dt, ddW, d1, d2, args):
 # -----------------------------------------------------------------------------
 # Taylor15 rhs functions for the stochastic master equation
 #
-def _rhs_rho_taylor_15_one(L, rho_t, t, A, dt, ddW, d1, d2, args):
+def _rhs_rho_taylor_15_one_py(L, rho_t, t, A, dt, ddW, d1, d2, args):
     """
     strong order 1.5 Tylor scheme for homodyne detection with 1 stochastic operator
     """
@@ -2368,7 +2467,7 @@ def _rhs_rho_taylor_15_one(L, rho_t, t, A, dt, ddW, d1, d2, args):
 # -----------------------------------------------------------------------------
 # Implicit rhs functions for the stochastic master equation
 #
-def _rhs_rho_milstein_implicit(L, rho_t, t, A, dt, ddW, d1, d2, args):
+def _rhs_rho_milstein_implicit_py(L, rho_t, t, A, dt, ddW, d1, d2, args):
     """
     Drift implicit Milstein (theta = 1/2, eta = 0)
     Wang, X., Gan, S., & Wang, D. (2012). 
@@ -2396,7 +2495,7 @@ def _rhs_rho_milstein_implicit(L, rho_t, t, A, dt, ddW, d1, d2, args):
 
     return v
     
-def _rhs_rho_taylor_15_implicit(L, rho_t, t, A, dt, ddW, d1, d2, args):
+def _rhs_rho_taylor_15_implicit_py(L, rho_t, t, A, dt, ddW, d1, d2, args):
     """
     Drift implicit Taylor 1.5 (alpha = 1/2, beta = doesn't matter)
     Chaptert 12.2 Eq. (2.18) in Numerical Solution of Stochastic Differential Equations
@@ -2434,7 +2533,7 @@ def _rhs_rho_taylor_15_implicit(L, rho_t, t, A, dt, ddW, d1, d2, args):
 # -----------------------------------------------------------------------------
 # Predictor Corrector rhs functions for the stochastic master equation
 #
-def _rhs_rho_pred_corr_homodyne_single(L, rho_t, t, A, dt, ddW, d1, d2, args):
+def _rhs_rho_pred_corr_homodyne_single_py(L, rho_t, t, A, dt, ddW, d1, d2, args):
     """
     1/2 predictor-corrector scheme for homodyne detection with 1 stochastic operator
     """
