@@ -111,10 +111,6 @@ def cy_smesolve_fast_single_trajectory(int n, object sso):
             for j in range(N_substeps):
                 rho_t = _rhs_rho_euler_homodyne_fast(rho_t, 
                         A_data, A_ind, A_ptr, A_size, dW[:, t_idx, j, 0])
-        if sso.rhs == 11:
-            for j in range(N_substeps):
-                rho_t = _rhs_rho_euler_homodyne_fast_2(rho_t, 
-                        A_data, A_ind, A_ptr, A_size, dW[:, t_idx, j, 0])
         elif sso.rhs == 20:
             for j in range(N_substeps):
                 rho_t = _rhs_rho_milstein_homodyne_single_fast(rho_t, 
@@ -144,6 +140,41 @@ def cy_smesolve_fast_single_trajectory(int n, object sso):
         elif sso.rhs == 40:
             for j in range(N_substeps):
                 rho_t = _rhs_rho_pred_corr_homodyne_single(rho_t, 
+                        A_data, A_ind, A_ptr, A_size, dt, dW[:, t_idx, j, 0])
+
+        elif sso.rhs == 110:
+            for j in range(N_substeps):
+                rho_t = _rhs_rho_euler_homodyne_fast_2(rho_t, 
+                        A_data, A_ind, A_ptr, A_size, dW[:, t_idx, j, 0])
+        elif sso.rhs == 120:
+            for j in range(N_substeps):
+                rho_t = _rhs_rho_milstein_homodyne_single_fast_2(rho_t, 
+                        A_data, A_ind, A_ptr, A_size, dW[:, t_idx, j, 0])
+        elif sso.rhs == 121:
+            for j in range(N_substeps):
+                rho_t = _rhs_rho_milstein_homodyne_two_fast_2(rho_t, 
+                        A_data, A_ind, A_ptr, A_size, dW[:, t_idx, j, 0])
+        elif sso.rhs == 122:
+            for j in range(N_substeps):
+                rho_t = _rhs_rho_milstein_homodyne_fast_2(rho_t, 
+                        A_data, A_ind, A_ptr, A_size, sc_len, dW[:, t_idx, j, 0])
+        elif sso.rhs == 125:
+            for j in range(N_substeps):
+                rho_t = _rhs_rho_milstein_implicit(rho_t, A_data, A_ind, A_ptr,
+                        Ae, AL_data, AL_ind, AL_ptr, 
+                        dt, dW[:, t_idx, j, 0], tol)
+        elif sso.rhs == 130:
+            for j in range(N_substeps):
+                rho_t = _rhs_rho_taylor_15_one(rho_t, A_data, A_ind, A_ptr,
+                        AL_data, AL_ind, AL_ptr, dt, dW[:, t_idx, j, 0])
+        elif sso.rhs == 135:
+            for j in range(N_substeps):
+                rho_t = _rhs_rho_taylor_15_implicit(rho_t, A_data, A_ind, A_ptr,
+                        Ae, AL_data, AL_ind, AL_ptr, 
+                        dt, dW[:, t_idx, j, 0], tol)
+        elif sso.rhs == 140:
+            for j in range(N_substeps):
+                rho_t = _rhs_rho_pred_corr_homodyne_single_2(rho_t, 
                         A_data, A_ind, A_ptr, A_size, dt, dW[:, t_idx, j, 0])
 
 
@@ -182,9 +213,9 @@ def dot(np.ndarray[double, ndim=1] V,
 
 
 
-@cython.boundscheck(False)
+#@cython.boundscheck(False)
 #@cython.wraparound(False)
-cdef _rhs_rho_euler_homodyne_fast(np.ndarray[complex, ndim=1] rho_t,
+cdef _rhs_rho_euler_homodyne_fast_2(np.ndarray[complex, ndim=1] rho_t,
                                 complex[::1] A_data,
                                 int[::1] A_ind, int[::1] A_ptr,
                                 int A_size,
@@ -204,7 +235,8 @@ cdef _rhs_rho_euler_homodyne_fast(np.ndarray[complex, ndim=1] rho_t,
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
-cdef _rhs_rho_euler_homodyne_fast_2(np.ndarray[complex, ndim=1] rho_t,
+@cython.cdivision(True)
+cdef _rhs_rho_euler_homodyne_fast(np.ndarray[complex, ndim=1] rho_t,
                                 complex[::1] A_data,
                                 int[::1] A_ind, int[::1] A_ptr,
                                 int A_size,
@@ -212,28 +244,67 @@ cdef _rhs_rho_euler_homodyne_fast_2(np.ndarray[complex, ndim=1] rho_t,
     """
     Fast Euler-Maruyama for homodyne detection.
     """
-    cdef np.ndarray[complex, ndim=2] d_vec = \
-        spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(-1, len(rho_t))
-    cdef np.ndarray[complex, ndim=1] drho_t = d_vec[n_sc_A]
     cdef int i, j, n_sc_A, l_rho
+    l_rho = len(rho_t)
+    cdef np.ndarray[complex, ndim=2] d_vec = \
+        spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(-1, l_rho)
+    #cdef np.ndarray[complex, ndim=1] drho_t = d_vec[n_sc_A]
     n_sc_A = d_vec.shape[0]-1
-    l_rho = d_vec.shape[1]
-    cdef np.ndarray[complex, ndim=1] e = \
-        d_vec[:n_sc_A].reshape(-1, A_size, A_size).trace(axis1=1, axis2=2)
+    cdef np.ndarray[complex, ndim=1] e = np.zeros(n_sc_A, dtype=complex)
+    for j in range(n_sc_A):
+        for i in range(A_size):
+            e[j] += d_vec[j,(A_size+1)*i]
 
     cdef double f = 1.0 
     for i in range(n_sc_A):
         f -= np.real(e[i])*dW[i]
 
     for i in range(l_rho):
+        rho_t[i] *=  f
+        rho_t[i] += d_vec[n_sc_A,i]
         for j in range(n_sc_A):
-            drho_t[i] += dW[j] * d_vec[j,i]
-        drho_t[i] +=  f * rho_t[i]
-    return drho_t
+            rho_t[i] += dW[j] * d_vec[j,i]
+    return rho_t
+
+@cython.boundscheck(False)
+@cython.wraparound(False)
+cdef _rhs_rho_milstein_homodyne_single_fast(np.ndarray[complex, ndim=1] rho_t,
+                                complex[::1] A_data,
+                                int[::1] A_ind, int[::1] A_ptr,
+                                int A_size,
+                                np.ndarray[double, ndim=1] dW):
+    """
+    Fast Milstein for homodyne detection with 1 stochastic operator
+    """
+
+    cdef int i, j, n_sc_A, l_rho
+    l_rho = len(rho_t)
+    cdef np.ndarray[complex, ndim=2] d_vec = \
+        spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(3, l_rho)
+    n_sc_A = 2#d_vec.shape[0]-1
+    cdef np.ndarray[double, ndim=1] e = np.zeros(n_sc_A)
+    for j in range(n_sc_A):
+        for i in range(A_size):
+            e[j] += d_vec[j,(A_size+1)*i].real
+
+    e[1] -= 2.0 * e[0] * e[0]
+
+    cdef double f = 1.
+    for i in range(n_sc_A):
+        f -= e[i] * dW[i]
+    dW[0] -= 2.0 * e[0] * dW[1]
+    
+    for i in range(l_rho):
+        rho_t[i] *= f
+        rho_t[i] += d_vec[n_sc_A,i]
+        for j in range(n_sc_A):
+            rho_t[i] += dW[j]* d_vec[j,i]
+
+    return rho_t
 
 @cython.boundscheck(False)
 #@cython.wraparound(False)
-cdef _rhs_rho_milstein_homodyne_single_fast(np.ndarray[complex, ndim=1] rho_t,
+cdef _rhs_rho_milstein_homodyne_single_fast_2(np.ndarray[complex, ndim=1] rho_t,
                                 complex[::1] A_data,
                                 int[::1] A_ind, int[::1] A_ptr,
                                 int A_size,
@@ -277,11 +348,7 @@ cdef _rhs_rho_milstein_homodyne_two_fast(np.ndarray[complex, ndim=1] rho_t,
     e[2:4] -= 2.0 * e[:2] * e[:2]
     e[4] -= 2.0 * e[1] * e[0]
     cdef double edw = np.inner(e, dW)*-1
-    if not( abs(edw) < 1):
-        print("e",e)
-        print("ee",ee)
-        print("a",A_data[0],A_data[1])
-        print("d",len(d_vec))
+
     cdef np.ndarray[complex, ndim=1] drho_t = edw * rho_t
     dW[:2] -= 2.0 * e[:2] * dW[2:4]
 
@@ -290,6 +357,37 @@ cdef _rhs_rho_milstein_homodyne_two_fast(np.ndarray[complex, ndim=1] rho_t,
     return rho_t + drho_t
 
 
+#@cython.boundscheck(False)
+#@cython.wraparound(False)
+cdef _rhs_rho_milstein_homodyne_two_fast_2(np.ndarray[complex, ndim=1] rho_t,
+                                complex[::1] A_data,
+                                int[::1] A_ind, int[::1] A_ptr,
+                                int A_size,
+                                np.ndarray[double, ndim=1] dW):
+    """
+    fast Milstein for homodyne detection with 2 stochastic operators
+    """
+    cdef np.ndarray[complex, ndim=2] d_vec = \
+        spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(-1, len(rho_t))
+    cdef np.ndarray[double, ndim=1] e = np.real(
+        d_vec[:-1].reshape(-1, A_size, A_size).trace(axis1=1, axis2=2))
+    ee = e*1.0
+    d_vec[-2] -= np.dot(e[:2][::-1], d_vec[:2])
+
+    e[2:4] -= 2.0 * e[:2] * e[:2]
+    e[4] -= 2.0 * e[1] * e[0]
+    cdef double edw = np.inner(e, dW)*-1
+    #if not( abs(edw) < 1):
+    #    print("e",e)
+    #    print("ee",ee)
+    #    print("a",A_data[0],A_data[1])
+    #    print("d",len(d_vec))
+    cdef np.ndarray[complex, ndim=1] drho_t = edw * rho_t
+    dW[:2] -= 2.0 * e[:2] * dW[2:4]
+
+    drho_t += d_vec[-1]
+    drho_t += np.dot(dW, d_vec[:-1])
+    return rho_t + drho_t
 
 
 @cython.boundscheck(False)
@@ -324,6 +422,37 @@ cdef _rhs_rho_milstein_homodyne_fast(np.ndarray[complex, ndim=1] rho_t,
 
     return rho_t + drho_t
 
+@cython.boundscheck(False)
+#@cython.wraparound(False)
+cdef _rhs_rho_milstein_homodyne_fast_2(np.ndarray[complex, ndim=1] rho_t,
+                                complex[::1] A_data,
+                                int[::1] A_ind, int[::1] A_ptr,
+                                int A_size, int sc_len,
+                                np.ndarray[double, ndim=1] dW):
+    """
+    fast Milstein for homodyne detection with >2 stochastic operators
+    """
+    cdef int sc2_len = 2 * sc_len
+
+    cdef np.ndarray[complex, ndim=2] d_vec = \
+        spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(-1, len(rho_t))
+    cdef np.ndarray[double, ndim=1] e = np.real(d_vec[:-1].reshape(
+        -1, A_size, A_size).trace(axis1=1, axis2=2))
+    d_vec[sc2_len:-1] -= np.array(
+        [e[m] * d_vec[n] + e[n] * d_vec[m]
+         for (n, m) in np.ndindex(sc_len, sc_len) if n > m])
+
+    e[sc_len:sc2_len] -= 2.0 * e[:sc_len] * e[:sc_len]
+    e[sc2_len:] -= 2.0 * np.array(
+        [e[n] * e[m] for (n, m) in np.ndindex(sc_len, sc_len) if n > m])
+
+    cdef np.ndarray[complex, ndim=1] drho_t = - np.inner(e, dW) * rho_t
+    dW[:sc_len] -= 2.0 * e[:sc_len] * dW[sc_len:sc2_len]
+
+    drho_t += d_vec[-1]
+    drho_t += np.dot(dW, d_vec[:-1])
+
+    return rho_t + drho_t
 # -----------------------------------------------------------------------------
 # Taylor15 rhs functions for the stochastic master equation
 #
@@ -435,7 +564,71 @@ cdef _rhs_rho_taylor_15_implicit(np.ndarray[complex, ndim=1] rho_t,
 # -----------------------------------------------------------------------------
 # Predictor Corrector rhs functions for the stochastic master equation
 #
+@cython.wraparound(False)
+@cython.boundscheck(False)
 cdef _rhs_rho_pred_corr_homodyne_single(np.ndarray[complex, ndim=1] rho_t,
+                                        complex[::1] A_data,
+                                        int[::1] A_ind, int[::1] A_ptr,
+                                        int A_size, double dt,
+                                        np.ndarray[double, ndim=1] dW):
+    """
+    1/2 predictor-corrector scheme for homodyne detection with 1 stochastic operator
+    """
+    
+    cdef int i, n_sc_A, l_rho
+    l_rho = len(rho_t)
+
+    #predictor
+    cdef np.ndarray[complex, ndim=2] d_vec
+    cdef np.ndarray[complex, ndim=1] e = np.zeros(2, dtype=complex)
+    cdef np.ndarray[double, ndim=1] er = np.zeros(2)
+    cdef np.ndarray[complex, ndim=1] a_pred, b_pred, a_corr, b_corr, pred_rho_t
+
+    d_vec = spmv_csr(A_data, A_ind, A_ptr, rho_t).reshape(3, l_rho)
+    n_sc_A = 2
+    for i in range(A_size):
+        e[0] += d_vec[0,(A_size+1)*i]
+        e[1] += d_vec[1,(A_size+1)*i]
+
+    a_pred = d_vec[n_sc_A]*1.0
+    pred_rho_t = a_pred*1.0
+    b_pred = - e[0] * rho_t
+
+    for i in range(l_rho):
+        b_pred[i] += d_vec[0,i]
+
+        a_pred[i] -= ((d_vec[1,i] - e[1] * rho_t[i]) - (2.0 * e[0]) * b_pred[i]) * (0.5 * dt)
+
+        pred_rho_t[i] += b_pred[i] * dW[0]
+        pred_rho_t[i] += rho_t[i]
+
+    #corrector
+    d_vec = spmv_csr(A_data, A_ind, A_ptr, pred_rho_t).reshape(3, l_rho)
+    for i in range(A_size):
+        er[0] += d_vec[0,(A_size+1)*i].real
+        er[1] += d_vec[1,(A_size+1)*i].real
+
+    a_corr = d_vec[n_sc_A]
+    b_corr = - er[0] * pred_rho_t
+
+    for i in range(l_rho):
+        b_corr[i] += d_vec[0,i]
+
+        a_corr[i] -= ((d_vec[1,i] - er[1] * pred_rho_t[i]) - (2.0 * er[0]) * b_corr[i]) * (0.5 * dt)
+        a_corr[i] += a_pred[i]
+        a_corr[i] *= 0.5
+
+        b_corr[i] += b_pred[i]
+        b_corr[i] *= 0.5 * dW[0]
+
+        rho_t[i] += a_corr[i]
+        rho_t[i] += b_corr[i]
+
+    return rho_t
+# -----------------------------------------------------------------------------
+# Predictor Corrector rhs functions for the stochastic master equation
+#
+cdef _rhs_rho_pred_corr_homodyne_single_2(np.ndarray[complex, ndim=1] rho_t,
                                         complex[::1] A_data,
                                         int[::1] A_ind, int[::1] A_ptr,
                                         int A_size, double dt,
@@ -453,7 +646,7 @@ cdef _rhs_rho_pred_corr_homodyne_single(np.ndarray[complex, ndim=1] rho_t,
     cdef np.ndarray[complex, ndim=1] b_pred = - e[0] * rho_t
     b_pred += d_vec[0]
 
-    cdef np.ndarray[complex, ndim=1]pred_rho_t = np.copy(a_pred)
+    cdef np.ndarray[complex, ndim=1] pred_rho_t = np.copy(a_pred)
     pred_rho_t += b_pred * dW[0]
     pred_rho_t += rho_t
 
@@ -480,7 +673,6 @@ cdef _rhs_rho_pred_corr_homodyne_single(np.ndarray[complex, ndim=1] rho_t,
     corr_rho_t += rho_t
 
     return corr_rho_t
-
 
 
 cdef _generate_noise_Milstein(int sc_len, int N_store, 

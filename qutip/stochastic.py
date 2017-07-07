@@ -603,9 +603,9 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
             else:
                 raise Exception("'fast-euler-maruyama' only support homodyne")
 
-        elif sso.solver == 'fast-euler-maruyama-2':
+        elif sso.solver == 'fast-euler-maruyama-old':
             if fast and sso.method == 'homodyne':
-                sso.rhs = 11
+                sso.rhs = 110
                 sso.generate_A_ops = _generate_A_ops_Euler
             else:
                 raise Exception("'fast-euler-maruyama' only support homodyne")
@@ -630,7 +630,26 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
                     sso.rhs = 21
                 else:
                     sso.rhs = 22
+        elif sso.solver == 'fast-milstein-old':
+            sso.generate_A_ops = _generate_A_ops_Milstein
+            sso.generate_noise = 20
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = 120
+                elif len(sc_ops) == 2:
+                    sso.rhs = 121
+                else:
+                    sso.rhs = 122
 
+            elif sso.method == 'heterodyne':
+                sso.d2_len = 1
+                sso.sc_ops = []
+                for sc in iter(sc_ops):
+                    sso.sc_ops += [sc / np.sqrt(2), -1.0j * sc / np.sqrt(2)]
+                if len(sc_ops) == 1:
+                    sso.rhs = 121
+                else:
+                    sso.rhs = 122
 
         elif sso.solver == 'milstein-imp':
             sso.generate_A_ops = _generate_A_ops_implicit
@@ -677,6 +696,17 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
             if sso.method == 'homodyne' or sso.method is None:
                 if len(sc_ops) == 1:
                     sso.rhs = 40
+                else:
+                    raise Exception("'pc-euler' : Only one stochastic operator is supported")
+            else:
+                raise Exception("'pc-euler' : Only homodyne is available")
+
+        elif sso.solver == 'pc-euler-old':
+            sso.generate_A_ops = _generate_A_ops_Milstein
+            sso.generate_noise = 20 # could also work without this
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = 140
                 else:
                     raise Exception("'pc-euler' : Only one stochastic operator is supported")
             else:
@@ -760,6 +790,7 @@ def smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
                     raise Exception("'pc-euler' : Only one stochastic operator is supported")
             else:
                 raise Exception("'pc-euler' : Only homodyne is available")
+
         if sso.rhs is None:
             raise Exception("The solver should be one of "+\
                             "[None, 'euler-maruyama', 'fast-euler-maruyama', "+\
