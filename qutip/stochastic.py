@@ -1752,7 +1752,6 @@ def d1_psi_homodyne(t, psi, A, args):
                   spmv(A[3], psi) -
                   0.25 * e1 ** 2 * psi)
 
-
 def d2_psi_homodyne(t, psi, A, args):
     """
     OK
@@ -1766,7 +1765,6 @@ def d2_psi_homodyne(t, psi, A, args):
 
     e1 = cy_expect_psi_csr(A[1].data, A[1].indices, A[1].indptr, psi, 0)
     return [spmv(A[0], psi) - 0.5 * e1 * psi]
-
 
 def d1_psi_heterodyne(t, psi, A, args):
     """
@@ -1786,7 +1784,6 @@ def d1_psi_heterodyne(t, psi, A, args):
     return (-0.5 * spmv(A[3], psi) +
             0.5 * e_Cd * spmv(A[0], psi) -
             0.25 * e_C * e_Cd * psi)
-
 
 def d2_psi_heterodyne(t, psi, A, args):
     """
@@ -1810,7 +1807,6 @@ def d2_psi_heterodyne(t, psi, A, args):
 
     return [d2_1, d2_2]
 
-
 def d1_psi_photocurrent(t, psi, A, args):
     """
     Need to cythonize.
@@ -1824,7 +1820,6 @@ def d1_psi_photocurrent(t, psi, A, args):
     """
     return (-0.5 * (spmv(A[3], psi)
             - norm(spmv(A[0], psi)) ** 2 * psi))
-
 
 def d2_psi_photocurrent(t, psi, A, args):
     """
@@ -1974,112 +1969,6 @@ def _generate_A_ops_implicit(sc, L, dt):
 
     return out1
 
-
-
-
-def _generate_noise_Milstein(sc_len, N_store, N_substeps, d2_len, dt):
-    """
-    generate noise terms for the fast Milstein scheme
-    """
-    dW_temp = np.sqrt(dt) * np.random.randn(sc_len, N_store, N_substeps, 1)
-    if sc_len == 1:
-        noise = np.vstack([dW_temp, 0.5 * (dW_temp * dW_temp - dt *
-                          np.ones((sc_len, N_store, N_substeps, 1)))])
-    else:
-        noise = np.vstack(
-            [dW_temp,
-             0.5 * (dW_temp * dW_temp -
-                    dt * np.ones((sc_len, N_store, N_substeps, 1)))] +
-            [[dW_temp[n] * dW_temp[m]
-              for (n, m) in np.ndindex(sc_len, sc_len) if n > m]])
-
-    return noise
-
-def d1_rho_homodyne(t, rho_vec, A, args):
-    """
-    D1[a] rho = lindblad_dissipator(a) * rho
-
-    Need to cythonize
-    """
-    return spmv(A[7], rho_vec)
-
-def d2_rho_homodyne(t, rho_vec, A, args):
-    """
-    D2[a] rho = a rho + rho a^\dagger - Tr[a rho + rho a^\dagger]
-              = (A_L + Ad_R) rho_vec - E[(A_L + Ad_R) rho_vec]
-
-    Need to cythonize, add A_L + Ad_R to precomputed operators
-    """
-    M = A[0] + A[3]
-
-    e1 = cy_expect_rho_vec(M, rho_vec, 0)
-    return [spmv(M, rho_vec) - e1 * rho_vec]
-
-def d1_rho_heterodyne(t, rho_vec, A, args):
-    """
-    Need to cythonize, docstrings
-    """
-    return spmv(A[7], rho_vec)
-
-def d2_rho_heterodyne(t, rho_vec, A, args):
-    """
-    Need to cythonize, docstrings
-    """
-    M = A[0] + A[3]
-    e1 = cy_expect_rho_vec(M, rho_vec, 0)
-    d1 = spmv(M, rho_vec) - e1 * rho_vec
-    M = A[0] - A[3]
-    e1 = cy_expect_rho_vec(M, rho_vec, 0)
-    d2 = spmv(M, rho_vec) - e1 * rho_vec
-    return [1.0 / np.sqrt(2) * d1, -1.0j / np.sqrt(2) * d2]
-
-def d1_rho_photocurrent(t, rho_vec, A, args):
-    """
-    Need to cythonize, add (AdA)_L + AdA_R to precomputed operators
-    """
-    n_sum = A[4] + A[5]
-    e1 = cy_expect_rho_vec(n_sum, rho_vec, 0)
-    return 0.5 * (e1 * rho_vec - spmv(n_sum, rho_vec))
-
-def d2_rho_photocurrent(t, rho_vec, A, args):
-    """
-    Need to cythonize, add (AdA)_L + AdA_R to precomputed operators
-    """
-    e1 = cy_expect_rho_vec(A[6], rho_vec, 0)
-    if e1.real > 1e-15:
-        return [spmv(A[6], rho_vec) / e1 - rho_vec]
-    else:
-        return [-rho_vec]
-
-
-# -----------------------------------------------------------------------------
-# Deterministic part of the rho/psi update functions. TODO: Make these
-# compatible with qutip's time-dependent hamiltonian and collapse operators
-#
-def _rhs_psi_deterministic(H, psi_t, t, dt, args):
-    """
-    Deterministic contribution to the density matrix change
-    """
-    dpsi_t = (-1.0j * dt) * (H * psi_t)
-
-    return dpsi_t
-
-def _rhs_rho_deterministic(L, rho_t, t, dt, args):
-    """
-    Deterministic contribution to the density matrix change
-    """
-    drho_t = spmv(L, rho_t) * dt
-
-    return drho_t
-
-def _rhs_rho_deterministic_td(L, rho_t, t, dt, args):
-    """
-    Deterministic contribution to the density matrix change
-    """
-    drho_t = spmv(L(t).data, rho_t) * dt
-
-    return drho_t
-
 # -----------------------------------------------------------------------------
 # Euler-Maruyama rhs functions for the stochastic Schrodinger 
 #
@@ -2140,6 +2029,113 @@ def _rhs_psi_platen(H, psi_t, t, A_ops, dt, dW, d1, d2, args):
 
     return dpsi_t
 
+def _rhs_psi_deterministic(H, psi_t, t, dt, args):
+    """
+    Deterministic contribution to the density matrix change
+    """
+    dpsi_t = (-1.0j * dt) * (H * psi_t)
+
+    return dpsi_t
+
+
+
+def _generate_noise_Milstein(sc_len, N_store, N_substeps, d2_len, dt):
+    """
+    generate noise terms for the fast Milstein scheme
+    """
+    dW_temp = np.sqrt(dt) * np.random.randn(sc_len, N_store, N_substeps, 1)
+    if sc_len == 1:
+        noise = np.vstack([dW_temp, 0.5 * (dW_temp * dW_temp - dt *
+                          np.ones((sc_len, N_store, N_substeps, 1)))])
+    else:
+        noise = np.vstack(
+            [dW_temp,
+             0.5 * (dW_temp * dW_temp -
+                    dt * np.ones((sc_len, N_store, N_substeps, 1)))] +
+            [[dW_temp[n] * dW_temp[m]
+              for (n, m) in np.ndindex(sc_len, sc_len) if n > m]])
+
+    return noise
+
+
+
+
+
+def d1_rho_homodyne(t, rho_vec, A, args):
+    """
+    D1[a] rho = lindblad_dissipator(a) * rho
+
+    Need to cythonize
+    """
+    return spmv(A[7], rho_vec)
+
+def d2_rho_homodyne(t, rho_vec, A, args):
+    """
+    D2[a] rho = a rho + rho a^\dagger - Tr[a rho + rho a^\dagger]
+              = (A_L + Ad_R) rho_vec - E[(A_L + Ad_R) rho_vec]
+
+    Need to cythonize, add A_L + Ad_R to precomputed operators
+    """
+    M = A[0] + A[3]
+
+    e1 = cy_expect_rho_vec(M, rho_vec, 0)
+    return [spmv(M, rho_vec) - e1 * rho_vec]
+
+def d1_rho_heterodyne(t, rho_vec, A, args):
+    """
+    Need to cythonize, docstrings
+    """
+    return spmv(A[7], rho_vec)
+
+def d2_rho_heterodyne(t, rho_vec, A, args):
+    """
+    Need to cythonize, docstrings
+    """
+    M = A[0] + A[3]
+    e1 = cy_expect_rho_vec(M, rho_vec, 0)
+    d1 = spmv(M, rho_vec) - e1 * rho_vec
+    M = A[0] - A[3]
+    e1 = cy_expect_rho_vec(M, rho_vec, 0)
+    d2 = spmv(M, rho_vec) - e1 * rho_vec
+    return [1.0 / np.sqrt(2) * d1, -1.0j / np.sqrt(2) * d2]
+
+def d1_rho_photocurrent(t, rho_vec, A, args):
+    """
+    Need to cythonize, add (AdA)_L + AdA_R to precomputed operators
+    """
+    n_sum = A[4] + A[5]
+    e1 = cy_expect_rho_vec(n_sum, rho_vec, 0)
+    return 0.5 * (e1 * rho_vec - spmv(n_sum, rho_vec))
+
+def d2_rho_photocurrent(t, rho_vec, A, args):
+    """
+    Need to cythonize, add (AdA)_L + AdA_R to precomputed operators
+    """
+    e1 = cy_expect_rho_vec(A[6], rho_vec, 0)
+    if e1.real > 1e-15:
+        return [spmv(A[6], rho_vec) / e1 - rho_vec]
+    else:
+        return [-rho_vec]
+
+# -----------------------------------------------------------------------------
+# Deterministic part of the rho/psi update functions. TODO: Make these
+# compatible with qutip's time-dependent hamiltonian and collapse operators
+#
+def _rhs_rho_deterministic(L, rho_t, t, dt, args):
+    """
+    Deterministic contribution to the density matrix change
+    """
+    drho_t = spmv(L, rho_t) * dt
+
+    return drho_t
+
+def _rhs_rho_deterministic_td(L, rho_t, t, dt, args):
+    """
+    Deterministic contribution to the density matrix change
+    """
+    drho_t = spmv(L(t).data, rho_t) * dt
+
+    return drho_t
 
 
 
@@ -2233,6 +2229,11 @@ def _rhs_rho_milstein_homodyne(L, rho_t, t, A_ops, dt, dW, d1, d2, args):
          for (n, m) in np.ndindex(A_len, A_len) if n != m], axis=0)
 
     return rho_t + drho_t
+
+# -----------------------------------------------------------------------------
+# Platen rhs functions for the stochastic master equation
+#
+
 
 # -----------------------------------------------------------------------------
 # Rhs functions for the stochastic master equation for time dependant cases
