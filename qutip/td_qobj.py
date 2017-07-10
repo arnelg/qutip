@@ -36,7 +36,7 @@
 from qutip import Qobj
 from qutip.interpolate import Cubic_Spline
 from functools import partial
-from types import FunctionType,BuiltinFunctionType
+from types import FunctionType, BuiltinFunctionType
 import numpy as np
 from numbers import Number
 from qutip.superoperator import liouvillian
@@ -134,8 +134,8 @@ class td_Qobj:
         issuper : boolt
             Indicates if the quantum object represents a superoperator.
         isoperket : bool
-            Indicates if the quantum object represents an operator in column vector
-            form.
+            Indicates if the quantum object represents an operator in column
+            vector form.
         isoperbra : bool
             Indicates if the quantum object represents an operator in row vector
             form.
@@ -166,7 +166,7 @@ class td_Qobj:
         self.const = False
         self.args = args
         self.cte = None
-        self.tlist  = tlist
+        self.tlist = tlist
         self.op_call = None
 
         op_type = self._td_format_check_single(Q_object, tlist)
@@ -177,10 +177,10 @@ class td_Qobj:
             if op_type == 0:
                 self.cte = Q_object
                 self.const = True
-                if Q_object.issuper :
+                if Q_object.issuper:
                     self.issuper = True
             elif op_type == 1:
-                #a function, no test to see if the function does return a Qobj.
+                # a function, no test to see if the function does return a Qobj.
                 self.op_call = Q_object
             elif op_type == -1:
                 pass
@@ -190,7 +190,7 @@ class td_Qobj:
             compile_count = 0
             for type_, op in zip(op_type, Q_object):
                 if type_ == 0:
-                    if self.cte == None:
+                    if self.cte is None:
                         self.cte = op
                     else:
                         self.cte += op
@@ -203,10 +203,13 @@ class td_Qobj:
                 elif type_ == 3:
                     l = len(self.ops)
                     self.ops.append([op[0], None,
-                            op[1].copy(), 3])
+                                op[1].copy(), 3])
 
-                    self.ops[-1][1] = lambda t,*args,l=l,**kw_args: (0 if (t > self.tlist[-1])
-                            else self.ops[l][2][int(round((len(self.tlist)-1) * (t/self.tlist[-1])))])
+                    self.ops[-1][1] = lambda t, *args, l=l, **kw_args:
+                                    (0 if (t > self.tlist[-1])
+                                    else self.ops[l][2][int(
+                                    round((len(self.tlist)-1) *
+                                    (t/self.tlist[-1])))])
                 else:
                     raise Exception("Should never be here")
 
@@ -227,15 +230,13 @@ class td_Qobj:
             if not self.ops:
                 self.const = True
 
-
-
     # Different function to get the state
     def __call__(self, t):
         if self.op_call is not None:
-            return self.op_call(t,**self.args)
+            return self.op_call(t, **self.args)
         op_t = self.cte
         for part in self.ops:
-            op_t += part[0]*part[1](t,**self.args)
+            op_t += part[0] * part[1](t, **self.args)
         return op_t
 
     def _td_array_to_str(self, op_np2, times):
@@ -255,7 +256,7 @@ class td_Qobj:
             str_op.append([op[0], H_td_str])
             n += 1
 
-        return str_op,np_args
+        return str_op, np_args
 
     def _td_format_check_single(self, Q_object, tlist=None):
         op_type = []
@@ -265,7 +266,7 @@ class td_Qobj:
         elif isinstance(Q_object, (FunctionType, BuiltinFunctionType, partial)):
             op_type = 1
         elif isinstance(Q_object, list):
-            if (len(Q_object) == 0 ):
+            if (len(Q_object) == 0):
                 op_type = -1
             for op_k in Q_object:
                 if isinstance(op_k, Qobj):
@@ -280,42 +281,38 @@ class td_Qobj:
                         elif isinstance(op_k[1], str):
                             op_type.append(2)
                         elif isinstance(op_k[1], np.ndarray):
-                            if not isinstance(tlist, np.ndarray) or not len(op_k[1]) == len(tlist):
+                            if not isinstance(tlist, np.ndarray) or not \
+                                        len(op_k[1]) == len(tlist):
                                 raise TypeError("Time list do not match")
                             op_type.append(3)
                         elif isinstance(op_k[1], Cubic_Spline):
-                            raise NotImplementedError("Cubic_Spline not supported")
+                            raise NotImplementedError(
+                                    "Cubic_Spline not supported")
                         #    h_obj.append(k)
                         else:
                             raise TypeError("Incorrect Q_object specification")
                     else:
                         raise TypeError("Incorrect Q_object specification")
-
-str_func
-
         else:
             raise TypeError("Incorrect Q_object specification")
-
         return op_type
 
     def _generate_op(self):
-
         compiled_str_coeff = self._compile_str_()
-
-        if( len(self.args) == 0 ):
+        if(len(self.args) == 0):
             def str_func_with_np(t):
                 return compiled_str_coeff(t)
         else:
             def str_func_with_np(t):
-                return compiled_str_coeff(t,*(list(zip(*self.args))[1]))
+                return compiled_str_coeff(t, *(list(zip(*self.args))[1]))
 
         return compiled_str_coeff
-
 
     def _compile_str_single(self, compile_list):
 
         import os
-        _cython_path = os.path.dirname(os.path.abspath(__file__)).replace("\\", "/")
+        _cython_path = os.path.dirname(os.path.abspath(__file__)).replace(
+                    "\\", "/")
         _include_string = "'"+_cython_path + "/cy/complex_math.pxi'"
 
         all_str = ""
@@ -348,7 +345,6 @@ include """+_include_string+"\n"
         file.writelines(Code)
         file.close()
 
-
         str_func = []
         imp = ' import '
         self.str_func = []
@@ -366,7 +362,7 @@ include """+_include_string+"\n"
 
         return str_func
 
-    def _str_2_code(self,str_coeff):
+    def _str_2_code(self, str_coeff):
 
         func_name = '_str_factor_'+ str(str_coeff[1])
 
@@ -381,7 +377,6 @@ def """ + func_name +"(double t"
         Code += "    return " + str_coeff[0] + "\n"
 
         return Code
-
 
     def _get_arg_str(self):
         if len(self.args) == 0:
@@ -402,23 +397,24 @@ def """ + func_name +"(double t"
                 ret += ",\n        " + kind + " " + name
         return ret
 
-
     def copy(self):
         new = td_Qobj(self.cte.copy())
         new.const = self.const
         new.op_call = self.op_call
         new.args = self.args
         for op in self.ops:
-            new.ops.append([None,None,None,None])
+            new.ops.append([None, None, None, None])
             new.ops[-1][0] = op[0].copy()
             new.ops[-1][3] = op[3]
             new.ops[-1][2] = op[2]
-            if new.ops[-1][3] in [1,2]:
+            if new.ops[-1][3] in [1, 2]:
                 new.ops[-1][1] = op[1]
             elif new.ops[-1][3] == 3:
                 l = len(new.ops)-1
-                new.ops[l][1] = lambda t,*args,l=l,**kw_args: (0 if (t > self.tlist[-1])
-                        else self.ops[l][2][int(round((len(self.tlist)-1) * (t/self.tlist[-1])))])
+                new.ops[l][1] = lambda t, *args, l=l, **kw_args:
+                        (0 if (t > self.tlist[-1])
+                        else self.ops[l][2][
+                        int(round((len(self.tlist)-1) * (t/self.tlist[-1])))])
         return new
 
     def __add__(self, other):
@@ -442,11 +438,11 @@ def """ + func_name +"(double t"
             else:
                 if other.tlist is None:
                     pass
-                elif len(other.tlist) != len(self.tlist) or other.tlist[-1] != self.tlist[-1]:
+                elif len(other.tlist) != len(self.tlist) or \
+                        other.tlist[-1] != self.tlist[-1]:
                     raise Exception("tlist are not compatible")
         else:
             self.cte += other
-
         return self
 
     def __sub__(self, other):
@@ -480,7 +476,8 @@ def """ + func_name +"(double t"
                 op[0] *= other
             return res
         else:
-            raise TypeError("td_qobj can only be multiplied with Qobj or numbers")
+            raise TypeError("td_qobj can only be multiplied" +
+                            " with Qobj or numbers")
         return self
 
     def __div__(self, other):
@@ -541,27 +538,28 @@ def """ + func_name +"(double t"
             op[0] = function(op[0], *args, **kw_args)
         return res
 
-    def tidyup(self,atol=1e-12):
+    def tidyup(self, atol=1e-12):
         self.cte = self.cte.tidyup(atol)
         for op in res.ops:
             op[0] = op[0].tidyup(atol)
         return res
 
-    def permute(self,order):
+    def permute(self, order):
         res = self.copy()
         res.cte = res.cte.permute(order)
         for op in res.ops:
             op[0] = op[0].permute(order)
         return res
 
-    def ptrace(self,sel):
+    def ptrace(self, sel):
         res = self.copy()
         res.cte = res.cte.ptrace(sel)
         for op in res.ops:
             op[0] = op[0].ptrace(sel)
         return res
 
-def td_liouvillian(H, c_ops=[],  chi=None):
+
+def td_liouvillian(H, c_ops=[], chi=None):
     """Assembles the Liouvillian superoperator from a Hamiltonian
     and a ``list`` of collapse operators. Accept time dependant
     operator and return a td_qobj
@@ -586,25 +584,24 @@ def td_liouvillian(H, c_ops=[],  chi=None):
         raise ValueError('chi must be a list with same length as c_ops')
 
     if H is not None:
-        if not isinstance(H,td_Qobj):
+        if not isinstance(H, td_Qobj):
             L = td_Qobj(H)
         else:
             L = H
         L = L.apply(liouvillian, chi=chi)
 
-
     if isinstance(c_ops, list) and len(c_ops) > 0:
-        def liouvillian_c(c_ops,chi):
-            return liouvillian(None,c_ops=[c_ops],chi=chi)
+        def liouvillian_c(c_ops, chi):
+            return liouvillian(None, c_ops=[c_ops], chi=chi)
         for c in c_ops:
-            if not isinstance(c,td_Qobj):
+            if not isinstance(c, td_Qobj):
                 cL = td_Qobj(c)
             else:
                 cL = c
 
             if L is None:
-                L = cL.apply(liouvillian_c,chi=chi)
+                L = cL.apply(liouvillian_c, chi=chi)
             else:
-                L += cL.apply(liouvillian_c,chi=chi)
+                L += cL.apply(liouvillian_c, chi=chi)
 
     return L
