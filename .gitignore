@@ -35,3 +35,4 @@ qutip/cy/openmp/*.cpp
 benchmark/benchmark_data.js
 *-tasks.txt
 
+qutip/td_qobj_back.py

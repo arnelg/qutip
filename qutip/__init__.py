@@ -205,6 +205,7 @@ from qutip.mesolve import *
 from qutip.sesolve import *
 from qutip.mcsolve import *
 from qutip.stochastic import *
+from qutip.new_stochastic import * ########################################
 from qutip.essolve import *
 from qutip.eseries import *
 from qutip.propagator import *
