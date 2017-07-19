@@ -39,7 +39,7 @@ from functools import partial
 from types import FunctionType, BuiltinFunctionType
 import numpy as np
 from numbers import Number
-from qutip.superoperator import liouvillian
+from qutip.superoperator import liouvillian, lindblad_dissipator
 
 
 class td_Qobj:
@@ -164,6 +164,7 @@ class td_Qobj:
 
     def __init__(self, Q_object=[], args={}, tlist=None):
         self.const = False
+        self.dummy_cte = False
         self.args = args
         self.cte = None
         self.tlist = tlist
@@ -180,7 +181,8 @@ class td_Qobj:
                 if Q_object.issuper:
                     self.issuper = True
             elif op_type == 1:
-                # a function, no test to see if the function does return a Qobj.
+                # a function, no test to see if the
+                # function does return a Qobj.
                 self.op_call = Q_object
             elif op_type == -1:
                 pass
@@ -202,14 +204,21 @@ class td_Qobj:
                     compile_count += 1
                 elif type_ == 3:
                     l = len(self.ops)
+                    N = len(self.tlist)
+                    dt = (N - 1) / self.tlist[-1]
                     self.ops.append([op[0], None,
-                                op[1].copy(), 3])
+                                     op[1].copy(), 3])
 
-                    self.ops[-1][1] = lambda t, *args, l=l, **kw_args:
-                                    (0 if (t > self.tlist[-1])
-                                    else self.ops[l][2][int(
-                                    round((len(self.tlist)-1) *
-                                    (t/self.tlist[-1])))])
+                    def from_array(t, *args, **kw_args):
+                        return _interpolate(t, self.ops[l][2], N, dt)
+
+                    self.ops[-1][1] = from_array
+
+#                    self.ops[-1][1] = lambda t, *args, l=l, **kw_args:
+#                                    (0 if (t > self.tlist[-1])
+#                                    else self.ops[l][2][int(
+#                                    round((len(self.tlist) - 1) *
+#                                    (t/self.tlist[-1])))])
                 else:
                     raise Exception("Should never be here")
 
@@ -226,9 +235,13 @@ class td_Qobj:
                 for op in self.ops[1:]:
                     self.cte += op[0]
                 self.cte *= 0.
+                self.dummy_cte = True
 
             if not self.ops:
                 self.const = True
+            else :
+                self.N_obj = (len(self.ops) if self.dummy_cte else len(self.ops) + 1)
+
 
     # Different function to get the state
     def __call__(self, t):
@@ -263,7 +276,8 @@ class td_Qobj:
 
         if isinstance(Q_object, Qobj):
             op_type = 0
-        elif isinstance(Q_object, (FunctionType, BuiltinFunctionType, partial)):
+        elif isinstance(Q_object, (FunctionType,
+                                   BuiltinFunctionType, partial)):
             op_type = 1
         elif isinstance(Q_object, list):
             if (len(Q_object) == 0):
@@ -276,7 +290,7 @@ class td_Qobj:
                         raise TypeError("Incorrect Q_object specification")
                     elif len(op_k) == 2:
                         if isinstance(op_k[1], (FunctionType,
-                                               BuiltinFunctionType, partial)):
+                                                BuiltinFunctionType, partial)):
                             op_type.append(1)
                         elif isinstance(op_k[1], str):
                             op_type.append(2)
@@ -349,7 +363,7 @@ include """+_include_string+"\n"
         imp = ' import '
         self.str_func = []
         for i in range(len(compile_list)):
-            func_name = '_str_factor_'+ str(i)
+            func_name = '_str_factor_' + str(i)
             import_code = compile('from ' + filename + ' import ' + func_name +
                                   "\nstr_func.append(" + func_name + ")",
                                   '<string>', 'exec')
@@ -364,14 +378,14 @@ include """+_include_string+"\n"
 
     def _str_2_code(self, str_coeff):
 
-        func_name = '_str_factor_'+ str(str_coeff[1])
+        func_name = '_str_factor_' + str(str_coeff[1])
 
         Code = """
 
 @cython.boundscheck(False)
 @cython.wraparound(False)
 
-def """ + func_name +"(double t"
+def """ + func_name + "(double t"
         Code += self._get_arg_str()
         Code += "):\n"
         Code += "    return " + str_coeff[0] + "\n"
@@ -402,6 +416,10 @@ def """ + func_name +"(double t"
         new.const = self.const
         new.op_call = self.op_call
         new.args = self.args
+        new.tlist = self.tlist
+        new.dummy_cte = self.dummy_cte
+        new.op_type = self.op_type
+        new.N_obj = self.N_obj
         for op in self.ops:
             new.ops.append([None, None, None, None])
             new.ops[-1][0] = op[0].copy()
@@ -410,12 +428,25 @@ def """ + func_name +"(double t"
             if new.ops[-1][3] in [1, 2]:
                 new.ops[-1][1] = op[1]
             elif new.ops[-1][3] == 3:
-                l = len(new.ops)-1
-                new.ops[l][1] = lambda t, *args, l=l, **kw_args:
-                        (0 if (t > self.tlist[-1])
-                        else self.ops[l][2][
-                        int(round((len(self.tlist)-1) * (t/self.tlist[-1])))])
+                l = len(self.ops) - 1
+                N = len(self.tlist)
+                dt = (N - 1) / self.tlist[-1]
+                self.ops.append([op[0], None,
+                                     op[1].copy(), 3])
+
+                    def from_array(t, *args, **kw_args):
+                        return _interpolate(t, new.ops[l][2], N, dt)
+
+                    new.ops[l][1] = from_array
+
+#                l = len(new.ops)-1
+#                new.ops[l][1] = lambda t, *args, l=l, **kw_args:
+#                                (0 if (t > self.tlist[-1])
+#                                else self.ops[l][2][
+#                                int(round((len(self.tlist) - 1) *
+#                                (t/self.tlist[-1])))])
         return new
+
 
     def __add__(self, other):
         res = self.copy()
@@ -433,8 +464,9 @@ def """ + func_name +"(double t"
             self.ops += other.ops
             self.args = {**self.args, **other.args}
             self.const = self.const and other.const
+            self.dummy_cte = self.dummy_cte and other.dummy_cte
             if self.tlist is None:
-                self.tlist  = other.tlist
+                self.tlist = other.tlist
             else:
                 if other.tlist is None:
                     pass
@@ -443,6 +475,9 @@ def """ + func_name +"(double t"
                     raise Exception("tlist are not compatible")
         else:
             self.cte += other
+            self.dummy_cte = False
+
+        self.N_obj = (len(self.ops) if self.dummy_cte else len(self.ops) + 1)
         return self
 
     def __sub__(self, other):
@@ -519,6 +554,7 @@ def """ + func_name +"(double t"
         res.cte = res.cte.conj()
         for op in res.ops:
             op[0] = op[0].conj()
+        self._f_conj()
         return res
 
     def dag(self):
@@ -526,16 +562,7 @@ def """ + func_name +"(double t"
         res.cte = res.cte.dag()
         for op in res.ops:
             op[0] = op[0].dag()
-        return res
-
-    def apply(self, function, *args, **kw_args):
-        res = self.copy()
-        cte_res = function(res.cte, *args, **kw_args)
-        if not isinstance(cte_res, Qobj):
-            raise TypeError("The function must return a Qobj")
-        res.cte = cte_res
-        for op in res.ops:
-            op[0] = function(op[0], *args, **kw_args)
+        self._f_conj()
         return res
 
     def tidyup(self, atol=1e-12):
@@ -558,6 +585,81 @@ def """ + func_name +"(double t"
             op[0] = op[0].ptrace(sel)
         return res
 
+    def apply(self, function, *args, **kw_args):
+        res = self.copy()
+        cte_res = function(res.cte, *args, **kw_args)
+        if not isinstance(cte_res, Qobj):
+            raise TypeError("The function must return a Qobj")
+        res.cte = cte_res
+        for op in res.ops:
+            op[0] = function(op[0], *args, **kw_args)
+        return res
+
+    def apply_decorator(self, function, *args, **kw_args):
+        res = self.copy()
+        for op in res.ops:
+            op[1] = function(op[1], *args, **kw_args)
+            op[2] = None
+        return res
+
+    def _f_norm2(self):
+        for op in res.ops:
+            if op[3] == 1:
+                op[1] = _norm2(op[1])
+                op[2] = op[1]            
+            elif op[3] == 2:
+                op[1] = _norm2(op[1])
+                op[2] = "norm(" + op[2] + ")"            
+            elif op[3] == 3:
+                op[2] = np.abs(op[2])**2
+
+
+    def _f_conj(f):
+        for op in res.ops:
+            if op[3] == 1:
+                op[1] = _norm2(op[1])
+                op[2] = op[1]            
+            elif op[3] == 2:
+                op[1] = _norm2(op[1])
+                op[2] = "conj(" + op[2] + ")"            
+            elif op[3] == 3:
+                op[2] = np.conj(op[2])
+
+
+
+def _interpolate(t, f_array, N, dt):
+    # inbound?
+    if t < 0.:
+        return f_array[0]    
+    if t > dt*(N-1): 
+        return f_array[N-1]
+
+    # On the boundaries, linear approximation
+    # Better sheme useful? 
+    if t < dt:
+        return f_array[0]*(dt-t)/dt + f_array[1]*t/dt
+    if t > dt*(N-2):
+        return f_array[N-2]*(dt*(N-1)-t)/dt + f_array[N-1]*(t-dt*(N-2))/dt
+
+    # In the middle: 4th order polynomial approximation
+    ii = int(t/dt)
+    a = (t/dt - ii)
+    approx  = (-a**3 +3*a**2 - 2*a   )/6.0*f_array[ii-1]
+    approx += ( a**3 -2*a**2 -   a +2)*0.5*f_array[ii]
+    approx += (-a**3 +  a**2 + 2*a   )*0.5*f_array[ii+1]
+    approx += ( a**3         -   a   )/6.0*f_array[ii+2]
+
+    return approx
+
+def _norm2(f):
+    def ff(a):
+        return np.abs(f(a))**2
+    return ff
+
+def _conj(f):
+    def ff(a):
+        return np.conj(f(a))
+    return ff
 
 def td_liouvillian(H, c_ops=[], chi=None):
     """Assembles the Liouvillian superoperator from a Hamiltonian
@@ -598,10 +700,44 @@ def td_liouvillian(H, c_ops=[], chi=None):
                 cL = td_Qobj(c)
             else:
                 cL = c
+            if not c.N_obj == 1:
+                raise Exception("Each c_ops must be composed of ony one Qobj " +\
+                                "to be used with in a time-dependent liouvillian")
 
             if L is None:
-                L = cL.apply(liouvillian_c, chi=chi)
+                L = cL.apply(liouvillian_c, chi=chi)._f_norm2()
+
             else:
-                L += cL.apply(liouvillian_c, chi=chi)
+                L += cL.apply(liouvillian_c, chi=chi)._f_norm2()
 
     return L
+
+
+def td_lindblad_dissipator(a):
+    """
+    Lindblad dissipator (generalized) for a single collapse operator.
+    For the 
+
+    .. math::
+
+        \\mathcal{D}[a,b]\\rho = a \\rho b^\\dagger -
+        \\frac{1}{2}a^\\dagger b\\rho - \\frac{1}{2}\\rho a^\\dagger b
+
+    Parameters
+    ----------
+    a : qobj
+        Left part of collapse operator.
+
+
+    Returns
+    -------
+    D : td_qobj
+        Lindblad dissipator superoperator.
+    """
+    b = td_Qobj(a)
+    if not b.N_obj == 1:
+        raise Exception("Each sc_ops must be composed of ony one Qobj " +\
+                        "to be used with in a time-dependent lindblad_dissipator")
+
+    D = b.apply(lindblad_dissipator)._f_norm2()
+    return D

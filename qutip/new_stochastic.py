@@ -288,7 +288,7 @@ def make_d1d2(sso):
                             "[None, 'homodyne', 'heterodyne', 'photocurrent']")
 
     if sso.method == 'homodyne' or sso.method is None:
-        sso.LH, sso.A_ops =  prep_sc_ops_homodyne_rho(sso.H, sso.c_ops, sso.sc_ops, sso.dt)
+        sso.LH, sso.A_ops =  prep_sc_ops_homodyne_rho(sso.H, sso.c_ops, sso.sc_ops, sso.dt, sso.td)
         if any(sso.td):
             sso.d1 = d1_rho_td
             sso.d2 = d2_rho_td
@@ -304,7 +304,7 @@ def make_d1d2(sso):
             sso.m_ops = [[c + c.dag()] for c in sso.sc_ops]
 
     elif sso.method == 'heterodyne':
-        sso.LH, sso.A_ops =  prep_sc_ops_heterodyne_psi(sso.H, sso.c_ops, sso.sc_ops, sso.dt)
+        sso.LH, sso.A_ops =  prep_sc_ops_heterodyne_psi(sso.H, sso.c_ops, sso.sc_ops, sso.dt, sso.td)
         if any(sso.td):
             sso.d1 = d1_rho_td
             sso.d2 = d2_rho_td
@@ -324,7 +324,7 @@ def make_d1d2(sso):
                          for c in sso.sc_ops]
 
     elif sso.method == 'photocurrent':
-        sso.LH, sso.A_ops =  prep_sc_ops_photocurrent_psi(sso.H, sso.c_ops, sso.sc_ops, sso.dt)
+        sso.LH, sso.A_ops =  prep_sc_ops_photocurrent_psi(sso.H, sso.c_ops, sso.sc_ops, sso.dt, sso.td)
         if any(sso.td):
             sso.d1 = d1_rho_photocurrent_td
             sso.d2 = d2_rho_photocurrent_td
@@ -521,6 +521,7 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
                                   sc_ops=sc_ops, e_ops=e_ops, **kwargs)
 
     sso.me = True
+    sso.dt = (times[1] - times[0]) / sso.nsubsteps
 
     #Is any of the rhs, (d1,d2), noise supplied?
     sso.custom = [False, False, False, False]
@@ -537,15 +538,16 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
         sso.custom[3] = True
 
     #Does any operator depend on time?
-    sso.td = [False, False, False]
+    #Now sc_ops = [[a],[a]] would be td
+    sso.td = [False, False]
         if not isinstance(H, Qobj):
             sso.td[0] = True
         for ops in c_ops:
             if not isinstance(ops, Qobj):
-                sso.td[1] = True
+                sso.td[0] = True
         for ops in sc_ops:
             if not isinstance(ops, Qobj):
-                sso.td[2] = True
+                sso.td[1] = True
 
     #Set default d1,d2 if not supplied
     if not sso.custom[1]:
@@ -555,7 +557,6 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
         sso.d2_len = len(sso.sc_ops)
         if any(sso.td):
             sso.LH = td_liouvillian(H, c_ops = c_ops)
-            sso.H_rhs = _rhs_deterministic_td
         else:
             sso.LH = liouvillian(H, c_ops = c_ops)
             sso.H_rhs = _rhs_deterministic
@@ -585,7 +586,6 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
         pass
 
     else:
-        #
         if sso.solver == 'euler-maruyama' or sso.solver is None:
             if fast and sso.method == 'homodyne':
                 sso.rhs = 10
@@ -595,6 +595,12 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
 
         elif sso.method == 'photocurrent':
             raise Exception("Only 'euler-maruyama' supports 'photocurrent'")
+
+        elif sso.solver == 'platen':
+            sso.rhs = _rhs_platen
+
+        elif sso.custom[1]: # Custom d1, d2
+            raise Exception("Only 'euler-maruyama' and 'platen' support custom d1,d2")
 
         elif sso.solver == 'milstein':
             if fast:
@@ -619,14 +625,10 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
                         sso.rhs = 22
             else :
                 sso.rhs = _rhs_milstein
-
-        elif sso.solver == 'platen':
-            sso.rhs = _rhs_platen
+                sso.d2 = d2_rho_milstein
 
         elif sso.td:
             raise Exception("Only 'euler-maruyama', 'milstein' and 'platen' support time dependant cases")
-        elif sso.custom[1]: # Custom d1, d2
-            raise Exception("Only 'euler-maruyama', 'milstein' and 'platen' support custom d1,d2")
         elif sso.custom[2]: # Custom noise function
             raise Exception("Only 'euler-maruyama', 'milstein' and 'platen' support custom noise function")
         elif not sso.method == 'homodyne': # Not yet done
@@ -722,10 +724,8 @@ def _smesolve_generic(sso, options, progress_bar):
 
     if sso.me:
         # Master equation
-        if not sso.td: 
-            task = _smesolve_single_trajectory
-        else:
-            task = _smesolve_single_trajectory_td
+        task = _smesolve_single_trajectory
+
         # use .data instead of Qobj ?
         sso.s_e_ops = [spre(e) for e in sso.e_ops]
 
@@ -737,10 +737,7 @@ def _smesolve_generic(sso, options, progress_bar):
                            for c in sso.sc_ops]
     else:
         # Schrodinger equation
-        if not sso.td: 
-            task = _ssesolve_single_trajectory
-        else:
-            task = _ssesolve_single_trajectory_td
+        task = _ssesolve_single_trajectory
 
     map_kwargs = {'progress_bar': progress_bar}
     map_kwargs.update(sso.map_kwargs)
@@ -786,50 +783,113 @@ def _smesolve_generic(sso, options, progress_bar):
 
     return data
 
+
 #
 #   Hamiltonian deterministic evolution
 #
-def _rhs_deterministic(H, vec_t, t, dt, args):
-    """
-    Deterministic contribution to the density matrix / Hamiltonian
-    """
-    return spmv(H, vec_t) 
-
-def _rhs_deterministic_td(H, vec_t, t, dt, args):
+def _rhs_deterministic(H, vec_t, t, dt, args, td):
     """
     Deterministic contribution to the density matrix / Hamiltonian for time-dependent cases
     """
-    return spmv(H(t).data, vec_t)
+    if td:
+        return spmv(H(t).data, vec_t)
+    else:
+        return spmv(H, vec_t) 
+
 
 #
 #   d1 and d2 functions for common schemes (Master Eq)
 #
-def prep_sc_ops_homodyne_rho(H, c_ops, sc_ops, dt):
-    L = liouvillian(H,c_ops=c_ops).data * dt
-    A = []
-    for sc in sc_ops:
-        L += lindblad_dissipator(sc, data_only=True) * dt
-        A += [spre(sc).data + spost(sc.dag()).data]
-    return L,A
+def prep_sc_ops_homodyne_rho(H, c_ops, sc_ops, dt, td):
+    if not any(td):
+        # No time-dependance
+        L = liouvillian(H, c_ops=c_ops).data * dt
+        A = []
+        for sc in sc_ops:
+            L += lindblad_dissipator(sc, data_only=True) * dt
+            A += [[spre(sc).data + spost(sc.dag()).data]]
 
-def prep_sc_ops_heterodyne_rho(H, c_ops, sc_ops, dt):
-    L = liouvillian(H,c_ops=c_ops).data * dt
-    A = []
-    for sc in sc_ops:
-        L += lindblad_dissipator(sc, data_only=True) * dt
-        A += [1.0 / np.sqrt(2) * (spre(sc).data + spost(sc.dag()).data)]
-        A += [-1.0j / np.sqrt(2) * (spre(sc).data - spost(sc.dag()).data)]
-    return L,A
+    else not td[1]:
+        # sc_ops do not depend on time
+        L = td_liouvillian(H, c_ops=c_ops).data * dt
+        A = []
+        for sc in sc_ops:
+            L += lindblad_dissipator(sc, data_only=True) * dt
+            A += [[spre(sc).data + spost(sc.dag()).data]]
 
-def prep_sc_ops_photocurrent_rho(H, c_ops, sc_ops, dt):
-    L = liouvillian(H,c_ops=c_ops).data * dt
-    A = []
-    for sc in sc_ops:
-        L += lindblad_dissipator(sc, data_only=True) * dt
-        A += [spre(n).data + spost(n).data, (spre(c) * spost(c.dag())).data]
-    return L,A
+    else:
+        td[0] = True
+        L = td_liouvillian(H, c_ops=c_ops) * dt
+        A = []
+        for sc in sc_ops:
+            L += lindblad_dissipator(sc, data_only=True) * dt
+            td_sc = td_Qobj(sc)
+            A += [[td_sc.apply(spre) + td_sc.apply(spost)]]
+    return L, A
 
-def d1_rho(t, rho_vec, sc_ops, args):
+def prep_sc_ops_heterodyne_rho(H, c_ops, sc_ops, dt, td):
+    if not any(td):
+        # No time-dependance
+        L = liouvillian(H, c_ops=c_ops).data * dt
+        A = []
+        for sc in sc_ops:
+            L += lindblad_dissipator(sc, data_only=True) * dt
+            A += [[ 1.0  / np.sqrt(2) * (spre(sc).data + spost(sc.dag()).data)]]
+            A += [[-1.0j / np.sqrt(2) * (spre(sc).data - spost(sc.dag()).data)]]
+
+    else not td[1]:
+        # sc_ops do not depend on time
+        L = td_liouvillian(H, c_ops=c_ops).data * dt
+        A = []
+        for sc in sc_ops:
+            L += lindblad_dissipator(sc) * dt
+            A += [[ 1.0  / np.sqrt(2) * (spre(sc).data + spost(sc.dag()).data)]]
+            A += [[-1.0j / np.sqrt(2) * (spre(sc).data - spost(sc.dag()).data)]]
+
+    else:
+        td[0] = True
+        L = td_liouvillian(H, c_ops=c_ops) * dt
+        A = []
+        for sc in sc_ops:
+            L += td_lindblad_dissipator(sc) * dt
+            td_sc = td_Qobj(sc)
+            A += [[ 1.0  / np.sqrt(2) * (td_sc.apply(spre) + td_sc.apply(spost))]]
+            A += [[-1.0j / np.sqrt(2) * (td_sc.apply(spre) - td_sc.apply(spost))]]
+    return L, A
+
+def prep_sc_ops_photocurrent_rho(H, c_ops, sc_ops, dt, td):
+    if not any(td):
+        # No time-dependance
+        L = liouvillian(H, c_ops=c_ops).data * dt
+        A = []
+        for sc in sc_ops:
+            L += lindblad_dissipator(sc, data_only=True) * dt
+            A += [[spre(n).data + spost(n).data, (spre(c) * spost(c.dag())).data]]
+
+    else not td[1]:
+        # sc_ops do not depend on time
+        L = td_liouvillian(H, c_ops=c_ops) * dt
+        A = []
+        for sc in sc_ops:
+            L += lindblad_dissipator(sc) * dt
+            A += [[spre(n).data + spost(n).data, (spre(c) * spost(c.dag())).data]]
+
+    else:
+        def _cdc(c):
+            return spre(c) * spost(c.dag())
+
+        td[0] = True
+        L = td_liouvillian(H, c_ops=c_ops) * dt
+        A = []
+        for sc in sc_ops:
+            L += td_lindblad_dissipator(sc) * dt
+            td_sc = td_Qobj(sc)
+            A += [[td_sc.apply(spre) + td_sc.apply(spost),
+                   td_sc.apply(_cdc)]]
+    return L, A
+
+
+def d1_rho(t, rho_vec, sc_ops, args, td):
     """
     D1[a] rho = lindblad_dissipator(a) * rho
     Included in the Liouvilllian
@@ -838,7 +898,7 @@ def d1_rho(t, rho_vec, sc_ops, args):
     """
     return np.zeros(len(rho_vec))#
 
-def d2_rho(t, rho_vec, sc_ops, args):
+def d2_rho(t, rho_vec, sc_ops, args, td):
     """
     D2[a] rho = a rho + rho a^\dagger - Tr[a rho + rho a^\dagger]
               = (A_L + Ad_R) rho_vec - E[(A_L + Ad_R) rho_vec]
@@ -846,14 +906,35 @@ def d2_rho(t, rho_vec, sc_ops, args):
     Homodyne + Heterodyne
     """
     d2 = []
-    for sc in sc_ops:
+    if td:
+        sc_t = [sc(t).data for sc in sc_ops]
+    else:
+        sc_t = sc_ops
+    for sc in sc_t:
+        e1 = cy_expect_rho_vec(sc(t), rho_vec, 0)
+        d2 += [spmv(sc(t), rho_vec) - e1 * rho_vec]
+    return np.vstack(d2)
+
+def d2_rho_milstein(t, rho_vec, sc_ops, args, td):
+    """
+    D2[a] rho = a rho + rho a^\dagger - Tr[a rho + rho a^\dagger]
+              = (A_L + Ad_R) rho_vec - E[(A_L + Ad_R) rho_vec]
+
+    Homodyne + Heterodyne
+    """
+    d2 = []
+    if td:
+        sc_t = [sc(t).data for sc in sc_ops]
+    else:
+        sc_t = sc_ops
+    for sc in sc_t:
         e1 = cy_expect_rho_vec(sc, rho_vec, 0)
         d2 += [spmv(sc, rho_vec) - e1 * rho_vec]
     d2_vec = np.vstack(d2)
 
     dd2 = []
     len_sc = len(sc_ops)
-    for sc in sc_ops:
+    for sc in sc_t:
         e1 = cy_expect_rho_vec(sc, rho_vec, 0)
         for d2 in d2_vec:
             e2 = cy_expect_rho_vec(sc, d2, 0)
@@ -861,73 +942,43 @@ def d2_rho(t, rho_vec, sc_ops, args):
 
     return np.vstack([d2_vec] + dd2).reshape((len_sc,len_sc,-1))
 
-def d1_rho_photocurrent(t, rho_vec, A, args):
+def d1_rho_photocurrent(t, rho_vec, A, args, td):
     d1 = np.zeros(len(rho_vec))
-    for sc in A:
+    if td:
+        sc_t = [sc[0](t).data for sc in A]
+    else:
+        sc_t = [sc[0] for sc in A]
+    for sc in sc_t:
         e1 = cy_expect_rho_vec(sc[0], rho_vec, 0)
         d1 += 0.5 * (e1 * rho_vec - spmv(sc[0], rho_vec))
     return d1
 
-def d2_rho_photocurrent(t, rho_vec, A, args):
+def d2_rho_photocurrent(t, rho_vec, A, args, td):
     d2 =[]
-    for sc in A:
-        e1 = cy_expect_rho_vec(sc[1], rho_vec, 0)
+    if td:
+        sc_t = [sc[1](t).data for sc in A]
+    else:
+        sc_t = [sc[1] for sc in A]
+    for sc in sc_t:
+        e1 = cy_expect_rho_vec(sc, rho_vec, 0)
         if e1.real > 1e-15:
-            d2 += [spmv(sc[1], rho_vec) / e1 - rho_vec]
+            d2 += [spmv(sc, rho_vec) / e1 - rho_vec]
         else:
             d2 += [-rho_vec]
     return np.vstack(d2)
 
-def d1_rho_td(t, rho_vec, sc_ops, args):
-    """
-    D1[a] rho = lindblad_dissipator(a) * rho
-    Included in the Liouvilllian
-
-    Homodyne + Heterodyne
-    """
-    return np.zeros(len(rho_vec))#
-
-def d2_rho_td(t, rho_vec, sc_ops, args):
-    """
-    D2[a] rho = a rho + rho a^\dagger - Tr[a rho + rho a^\dagger]
-              = (A_L + Ad_R) rho_vec - E[(A_L + Ad_R) rho_vec]
-
-    Homodyne + Heterodyne
-    """
-    d2 = []
-    for sc in sc_ops:
-        e1 = cy_expect_rho_vec(sc(t), rho_vec, 0)
-        d2 += [spmv(sc(t), rho_vec) - e1 * rho_vec]
-    return np.vstack(d2)
-
-def d1_rho_photocurrent_td(t, rho_vec, A, args):
-    d1 = np.zeros(len(rho_vec))
-    for sc in A:
-        e1 = cy_expect_rho_vec(sc[0](t), rho_vec, 0)
-        d1 += 0.5 * (e1 * rho_vec - spmv(sc[0](t), rho_vec))
-    return d1
-
-def d2_rho_photocurrent_td(t, rho_vec, A, args):
-    d2 =[]
-    for sc in A:
-        e1 = cy_expect_rho_vec(sc[1](t), rho_vec, 0)
-        if e1.real > 1e-15:
-            d2 += [spmv(sc[1](t), rho_vec) / e1 - rho_vec]
-        else:
-            d2 += [-rho_vec]
-    return np.vstack(d2)
 
 #
 #   d1 and d2 functions for common schemes (Schrodinger)
 #
-def prep_sc_ops_homodyne_psi(H, c_ops, sc_ops, dt):
+def prep_sc_ops_homodyne_psi(H, c_ops, sc_ops, dt, td):
     H = (H*-1.0j).data * dt
     A = []
     for sc in sc_ops:
         A += [[sc.data, (sc + sc.dag()).data, (c.dag() * c).data]]
     return H,A
 
-def prep_sc_ops_heterodyne_psi(H, c_ops, sc_ops, dt):
+def prep_sc_ops_heterodyne_psi(H, c_ops, sc_ops, dt, td):
     H = (H*-1.0j).data * dt
     A = []
     for sc in sc_ops:
@@ -935,14 +986,15 @@ def prep_sc_ops_heterodyne_psi(H, c_ops, sc_ops, dt):
                 (c - c.dag()).data, (c.dag() * c).data])
     return H,A
 
-def prep_sc_ops_photocurrent_psi(H, c_ops, sc_ops, dt):
+def prep_sc_ops_photocurrent_psi(H, c_ops, sc_ops, dt, td):
     H = (H*-1.0j).data * dt
     A = []
     for sc in sc_ops:
         A += [[sc.data, (c.dag() * c).data]]
     return H,A
 
-def d1_psi_homodyne(t, psi, A, args):
+
+def d1_psi_homodyne(t, psi, A, args, td):
     """
     .. math::
         D_1(C, \psi) = \\frac{1}{2}(\\langle C + C^\\dagger\\rangle\\C psi -
@@ -956,7 +1008,7 @@ def d1_psi_homodyne(t, psi, A, args):
                     0.25 * e1 ** 2 * psi)
     return d1
 
-def d2_psi_homodyne(t, psi, A, args):
+def d2_psi_homodyne(t, psi, A, args, td):
     """
     .. math::
         D_2(\psi, t) = (C - \\frac{1}{2}\\langle C + C^\\dagger\\rangle)\\psi
@@ -967,7 +1019,7 @@ def d2_psi_homodyne(t, psi, A, args):
         d2 += [spmv(sc[0], psi) - 0.5 * e1 * psi]
     return np.vstack(d2)
 
-def d1_psi_heterodyne(t, psi, A, args):
+def d1_psi_heterodyne(t, psi, A, args, td):
     """
     .. math::
         D_1(\psi, t) = -\\frac{1}{2}(C^\\dagger C -
@@ -983,7 +1035,7 @@ def d1_psi_heterodyne(t, psi, A, args):
                 0.25 * e_C * e_Cd * psi)
     return d1
 
-def d2_psi_heterodyne(t, psi, A, args):
+def d2_psi_heterodyne(t, psi, A, args, td):
     """
         X = \\frac{1}{2}(C + C^\\dagger)
         Y = \\frac{1}{2}(C - C^\\dagger)
@@ -998,7 +1050,7 @@ def d2_psi_heterodyne(t, psi, A, args):
         d2 += [-1.0j * np.sqrt(0.5) * (spmv(A[0], psi) - Y * psi)]
     return np.vstack(d2)
 
-def d1_psi_photocurrent(t, psi, A, args):
+def d1_psi_photocurrent(t, psi, A, args, td):
     """
     Note: requires poisson increments
     .. math::
@@ -1010,7 +1062,7 @@ def d1_psi_photocurrent(t, psi, A, args):
                 - norm(spmv(A[0], psi)) ** 2 * psi))
     return d1
 
-def d2_psi_photocurrent(t, psi, A, args):
+def d2_psi_photocurrent(t, psi, A, args, td):
     """
     Note: requires poisson increments
     .. math::
@@ -1026,7 +1078,7 @@ def d2_psi_photocurrent(t, psi, A, args):
             d2 += [- psi]
     return np.vstack(d2)
 
-def d1_psi_homodyne_td(t, psi, A, args):
+def d1_psi_homodyne_td(t, psi, A, args, td):
     """
     .. math::
         D_1(C, \psi) = \\frac{1}{2}(\\langle C + C^\\dagger\\rangle\\C psi -
@@ -1040,7 +1092,7 @@ def d1_psi_homodyne_td(t, psi, A, args):
                     0.25 * e1 ** 2 * psi)
     return d1
 
-def d2_psi_homodyne_td(t, psi, A, args):
+def d2_psi_homodyne_td(t, psi, A, args, td):
     """
     .. math::
         D_2(\psi, t) = (C - \\frac{1}{2}\\langle C + C^\\dagger\\rangle)\\psi
@@ -1051,7 +1103,7 @@ def d2_psi_homodyne_td(t, psi, A, args):
         d2 += [spmv(sc[0](t), psi) - 0.5 * e1 * psi]
     return np.vstack(d2)
 
-def d1_psi_heterodyne_td(t, psi, A, args):
+def d1_psi_heterodyne_td(t, psi, A, args, td):
     """
     .. math::
         D_1(\psi, t) = -\\frac{1}{2}(C^\\dagger C -
@@ -1067,7 +1119,7 @@ def d1_psi_heterodyne_td(t, psi, A, args):
                 0.25 * e_C * e_Cd * psi)
     return d1
 
-def d2_psi_heterodyne_td(t, psi, A, args):
+def d2_psi_heterodyne_td(t, psi, A, args, td):
     """
         X = \\frac{1}{2}(C + C^\\dagger)
         Y = \\frac{1}{2}(C - C^\\dagger)
@@ -1082,7 +1134,7 @@ def d2_psi_heterodyne_td(t, psi, A, args):
         d2 += [-1.0j * np.sqrt(0.5) * (spmv(A[0](t), psi) - Y * psi)]
     return np.vstack(d2)
 
-def d1_psi_photocurrent_td(t, psi, A, args):
+def d1_psi_photocurrent_td(t, psi, A, args, td):
     """
     Note: requires poisson increments
     .. math::
@@ -1094,7 +1146,7 @@ def d1_psi_photocurrent_td(t, psi, A, args):
                 - norm(spmv(A[0](t), psi)) ** 2 * psi))
     return d1
 
-def d2_psi_photocurrent_td(t, psi, A, args):
+def d2_psi_photocurrent_td(t, psi, A, args, td):
     """
     Note: requires poisson increments
     .. math::
@@ -1110,22 +1162,23 @@ def d2_psi_photocurrent_td(t, psi, A, args):
             d2 += [- psi]
     return np.vstack(d2)
 
+
 #
 #   Stochastic schemes
 #
-def _rhs_euler_maruyama(vec_t, t, dt,  H, sc_ops, dW, H_rhs, d1, d2, args):
+def _rhs_euler_maruyama(vec_t, t, dt, H, sc_ops, dW, d1, d2, args, td):
     """
     Euler-Maruyama rhs function for both master eq and schrodinger eq.
 
     dV = -iH*V*dt + d1*dt + d2_i*dW_i
     """
-    dvec_t = H_rhs(H, vec_t, t, dt, args)
-    dvec_t += d1(t, vec_t, sc_ops, args) * dt 
-    d2_vec = d2(t, vec_t, sc_ops, args)
+    dvec_t = _rhs_deterministic(H, vec_t, t, dt, args, td[0])
+    dvec_t += d1(t, vec_t, sc_ops, args, td[1]) * dt 
+    d2_vec = d2(t, vec_t, sc_ops, args, td[1])
     dvec_t += np.dot(dW, d2_vec)
     return vec_t + dvec_t
 
-def _rhs_milstein(vec_t, t, dt,  H, sc_ops, dW, H_rhs, d1, d2, args):
+def _rhs_milstein(vec_t, t, dt, H, sc_ops, dW, d1, d2, args, td):
     """
     Milstein rhs function for both master eq and schrodinger eq.
 
@@ -1137,9 +1190,9 @@ def _rhs_milstein(vec_t, t, dt,  H, sc_ops, dW, H_rhs, d1, d2, args):
     """
 
     #Euler part
-    dvec_t = H_rhs(H, vec_t, t, dt, args)
-    dvec_t += d1(t, vec_t, sc_ops, args) * dt 
-    d2_ = d2(t, vec_t, sc_ops, args)
+    dvec_t = _rhs_deterministic(H, vec_t, t, dt, args, td[0])
+    dvec_t += d1(t, vec_t, sc_ops, args, td[1]) * dt 
+    d2_ = d2(t, vec_t, sc_ops, args, td[1])
     d2_vec = d2_[0,:,:]
     d22_vec = d2_[1:,:,:]
     dvec_t += np.dot(dW, d2_vec)
@@ -1152,7 +1205,7 @@ def _rhs_milstein(vec_t, t, dt,  H, sc_ops, dW, H_rhs, d1, d2, args):
 
     return vec_t + dvec_t
 
-def _rhs_platen(vec_t, t, dt,  H, sc_ops, dW, H_rhs, d1, d2, args):
+def _rhs_platen(vec_t, t, dt, H, sc_ops, dW, d1, d2, args, td):
     """
     Platen rhs function for both master eq and schrodinger eq.
     
@@ -1169,25 +1222,26 @@ def _rhs_platen(vec_t, t, dt,  H, sc_ops, dW, H_rhs, d1, d2, args):
     sqrt_dt = np.sqrt(dt)
 
     #Build Vt, V+, V-
-    dv_H1 = H_rhs(H, vec_t, t, dt, args)
-    dv_H1 += d1(t, vec_t, sc_ops, args) * dt 
-    d2_vec = d2(t, vec_t, sc_ops, args)
+    dv_H1 = _rhs_deterministic(H, vec_t, t, dt, args, td[0])
+    dv_H1 += d1(t, vec_t, sc_ops, args, td[1]) * dt 
+    d2_vec = d2(t, vec_t, sc_ops, args, td[1])
     Vp = vec_t + dv_H1 + np.sum(d2_vec,axis=0)*sqrt_dt
     Vm = vec_t + dv_H1 - np.sum(d2_vec,axis=0)*sqrt_dt
     Vt = vec_t + dv_H1 + np.dot(dW, d2_vec)
 
     # Platen dV
-    dvt_H1 = H_rhs(H, Vt, t+dt, dt, args)
-    dvt_H1 += d1(t+dt, Vt, sc_ops, args) * dt 
+    dvt_H1 = _rhs_deterministic(H, Vt, t+dt, dt, args, td[0])
+    dvt_H1 += d1(t+dt, Vt, sc_ops, args, td[1]) * dt 
     dvec_t = 0.50 * (dv_H1 + dvt_H1)
 
-    d2_vp = d2(t+dt, Vp, sc_ops, args)
-    d2_vm = d2(t+dt, Vm, sc_ops, args)
+    d2_vp = d2(t+dt, Vp, sc_ops, args, td[1])
+    d2_vm = d2(t+dt, Vm, sc_ops, args, td[1])
     dvec_t += np.dot(dW, 0.25*(2 * d2_vec + d2_vp + d2_vm))
     dW2 = (dW**2 - dt) / sqrt_dt
     dvec_t += np.dot(dW, 0.25*(d2_vp - d2_vm))
 
     return vec_t + dvec_t
+
 
 #
 #   Preparation of operator for the fast version 
