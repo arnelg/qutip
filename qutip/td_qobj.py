@@ -169,6 +169,7 @@ class td_Qobj:
         self.cte = None
         self.tlist = tlist
         self.op_call = None
+        self.valid = True
 
         op_type = self._td_format_check_single(Q_object, tlist)
         self.op_type = op_type
@@ -205,11 +206,11 @@ class td_Qobj:
                 elif type_ == 3:
                     l = len(self.ops)
                     N = len(self.tlist)
-                    dt = (N - 1) / self.tlist[-1]
+                    dt = self.tlist[-1] / (N - 1)
                     self.ops.append([op[0], None,
                                      op[1].copy(), 3])
 
-                    def from_array(t, *args, **kw_args):
+                    def from_array(t, l=l, *args, **kw_args):
                         return _interpolate(t, self.ops[l][2], N, dt)
 
                     self.ops[-1][1] = from_array
@@ -239,8 +240,7 @@ class td_Qobj:
 
             if not self.ops:
                 self.const = True
-            else :
-                self.N_obj = (len(self.ops) if self.dummy_cte else len(self.ops) + 1)
+        self.N_obj = (len(self.ops) if self.dummy_cte else len(self.ops) + 1)
 
 
     # Different function to get the state
@@ -420,31 +420,25 @@ def """ + func_name + "(double t"
         new.dummy_cte = self.dummy_cte
         new.op_type = self.op_type
         new.N_obj = self.N_obj
-        for op in self.ops:
+        new.valid = self.valid
+
+        for l, op in enumerate(self.ops):
             new.ops.append([None, None, None, None])
-            new.ops[-1][0] = op[0].copy()
-            new.ops[-1][3] = op[3]
-            new.ops[-1][2] = op[2]
-            if new.ops[-1][3] in [1, 2]:
-                new.ops[-1][1] = op[1]
-            elif new.ops[-1][3] == 3:
-                l = len(self.ops) - 1
+            new.ops[l][0] = op[0].copy()
+            new.ops[l][3] = op[3]
+            if new.ops[l][3] in [1, 2]:
+                new.ops[l][1] = op[1]
+                new.ops[l][2] = op[2]
+            elif new.ops[l][3] == 3:
                 N = len(self.tlist)
-                dt = (N - 1) / self.tlist[-1]
-                self.ops.append([op[0], None,
-                                     op[1].copy(), 3])
+                dt = self.tlist[-1] / (N - 1)
+                new.ops[l][2] = op[2].copy()
 
-                    def from_array(t, *args, **kw_args):
-                        return _interpolate(t, new.ops[l][2], N, dt)
+                def from_array(t, l=l, *args, **kw_args):
+                    return _interpolate(t, new.ops[l][2], N, dt)
 
-                    new.ops[l][1] = from_array
+                new.ops[l][1] = from_array
 
-#                l = len(new.ops)-1
-#                new.ops[l][1] = lambda t, *args, l=l, **kw_args:
-#                                (0 if (t > self.tlist[-1])
-#                                else self.ops[l][2][
-#                                int(round((len(self.tlist) - 1) *
-#                                (t/self.tlist[-1])))])
         return new
 
 
@@ -465,6 +459,8 @@ def """ + func_name + "(double t"
             self.args = {**self.args, **other.args}
             self.const = self.const and other.const
             self.dummy_cte = self.dummy_cte and other.dummy_cte
+            self.valid = self.valid and other.valid
+
             if self.tlist is None:
                 self.tlist = other.tlist
             else:
@@ -507,9 +503,8 @@ def """ + func_name + "(double t"
     def __imul__(self, other):
         if isinstance(other, Qobj) or isinstance(other, Number):
             self.cte *= other
-            for op in enumerate(ops):
+            for op in self.ops:
                 op[0] *= other
-            return res
         else:
             raise TypeError("td_qobj can only be multiplied" +
                             " with Qobj or numbers")
@@ -554,7 +549,7 @@ def """ + func_name + "(double t"
         res.cte = res.cte.conj()
         for op in res.ops:
             op[0] = op[0].conj()
-        self._f_conj()
+        res._f_conj()
         return res
 
     def dag(self):
@@ -562,7 +557,19 @@ def """ + func_name + "(double t"
         res.cte = res.cte.dag()
         for op in res.ops:
             op[0] = op[0].dag()
-        self._f_conj()
+        res._f_conj()
+        return res
+
+    # When name fixed, put in stochastic 
+    def norm(self):
+        """return a.dag * a """
+        if not self.N_obj == 1:
+            raise NotImplementedError("")
+        res = self.copy()
+        res.cte = res.cte.dag() * res.cte
+        for op in res.ops:
+            op[0] = op[0].dag() * op[0]
+        res._f_norm2()
         return res
 
     def tidyup(self, atol=1e-12):
@@ -572,7 +579,6 @@ def """ + func_name + "(double t"
         return res
 
     def permute(self, order):
-        res = self.copy()
         res.cte = res.cte.permute(order)
         for op in res.ops:
             op[0] = op[0].permute(order)
@@ -595,15 +601,35 @@ def """ + func_name + "(double t"
             op[0] = function(op[0], *args, **kw_args)
         return res
 
-    def apply_decorator(self, function, *args, **kw_args):
+    def apply_decorator(self, function, *args, str_mod=None, inplace_np=False, **kw_args):
         res = self.copy()
         for op in res.ops:
-            op[1] = function(op[1], *args, **kw_args)
-            op[2] = None
+            if op[3] == 1:
+                op[1] = function(op[1], *args, **kw_args)
+                op[2] = function(op[1], *args, **kw_args)
+            if op[3] == 2:
+                op[1] = function(op[1], *args, **kw_args)
+                if str_mod is None:
+                    op[2] = None
+                    res.valid = False
+                else:
+                    op[2] = str_mod[0] + op[2] + str_mod[1]
+            elif op[3] == 3:
+                if inplace_np:
+                    # keep the original function, change the array
+                    def f(a):
+                        return a
+                    ff = function(f, *args, **kw_args)
+                    for i, v in enumerate(op[2]):
+                        op[2][i] = ff(v)
+                else:
+                    op[1] = function(op[1], *args, **kw_args)
+                    res.valid = False
+
         return res
 
     def _f_norm2(self):
-        for op in res.ops:
+        for op in self.ops:
             if op[3] == 1:
                 op[1] = _norm2(op[1])
                 op[2] = op[1]            
@@ -612,19 +638,20 @@ def """ + func_name + "(double t"
                 op[2] = "norm(" + op[2] + ")"            
             elif op[3] == 3:
                 op[2] = np.abs(op[2])**2
+        return self
 
 
-    def _f_conj(f):
-        for op in res.ops:
+    def _f_conj(self):
+        for op in self.ops:
             if op[3] == 1:
-                op[1] = _norm2(op[1])
+                op[1] = _conj(op[1])
                 op[2] = op[1]            
             elif op[3] == 2:
-                op[1] = _norm2(op[1])
+                op[1] = _conj(op[1])
                 op[2] = "conj(" + op[2] + ")"            
             elif op[3] == 3:
                 op[2] = np.conj(op[2])
-
+        return self
 
 
 def _interpolate(t, f_array, N, dt):
@@ -652,13 +679,13 @@ def _interpolate(t, f_array, N, dt):
     return approx
 
 def _norm2(f):
-    def ff(a):
-        return np.abs(f(a))**2
+    def ff(a, **kwargs):
+        return np.abs(f(a, **kwargs))**2
     return ff
 
 def _conj(f):
-    def ff(a):
-        return np.conj(f(a))
+    def ff(a, **kwargs):
+        return np.conj(f(a, **kwargs))
     return ff
 
 def td_liouvillian(H, c_ops=[], chi=None):
@@ -700,7 +727,7 @@ def td_liouvillian(H, c_ops=[], chi=None):
                 cL = td_Qobj(c)
             else:
                 cL = c
-            if not c.N_obj == 1:
+            if not cL.N_obj == 1:
                 raise Exception("Each c_ops must be composed of ony one Qobj " +\
                                 "to be used with in a time-dependent liouvillian")
 
@@ -734,7 +761,10 @@ def td_lindblad_dissipator(a):
     D : td_qobj
         Lindblad dissipator superoperator.
     """
-    b = td_Qobj(a)
+    if not isinstance(a, td_Qobj):
+        b = td_Qobj(a)
+    else:
+        b = a
     if not b.N_obj == 1:
         raise Exception("Each sc_ops must be composed of ony one Qobj " +\
                         "to be used with in a time-dependent lindblad_dissipator")

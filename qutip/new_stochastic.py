@@ -540,14 +540,14 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
     #Does any operator depend on time?
     #Now sc_ops = [[a],[a]] would be td
     sso.td = [False, False]
-        if not isinstance(H, Qobj):
+    if not isinstance(H, Qobj):
+        sso.td[0] = True
+    for ops in c_ops:
+        if not isinstance(ops, Qobj):
             sso.td[0] = True
-        for ops in c_ops:
-            if not isinstance(ops, Qobj):
-                sso.td[0] = True
-        for ops in sc_ops:
-            if not isinstance(ops, Qobj):
-                sso.td[1] = True
+    for ops in sc_ops:
+        if not isinstance(ops, Qobj):
+            sso.td[1] = True
 
     #Set default d1,d2 if not supplied
     if not sso.custom[1]:
@@ -710,8 +710,7 @@ def _smesolve_generic(sso, options, progress_bar):
         logger.debug(inspect.stack()[0][3])
 
     sso.N_store = len(sso.times)
-    sso.N_substeps = sso.nsubsteps
-    sso.dt = (sso.times[1] - sso.times[0]) / sso.N_substeps
+    sso.dt = (sso.times[1] - sso.times[0]) / sso.nsubsteps
     nt = sso.ntraj
 
     data = Result()
@@ -783,6 +782,88 @@ def _smesolve_generic(sso, options, progress_bar):
 
     return data
 
+def _smesolve_single_trajectory(n, sso):
+    """
+    Internal function. See smesolve.
+    """
+    dt = sso.dt
+    times = sso.times
+    d1, d2 = sso.d1, sso.d2
+    d2_len = sso.d2_len
+    L = sso.L
+    N_substeps = sso.nsubsteps
+    N_store = sso.N_store
+    A_ops = sso.A_ops
+
+    rho_t = mat2vec(sso.state0.full()).ravel()
+    dims = sso.state0.dims
+
+    expect = np.zeros((len(sso.e_ops), sso.N_store), dtype=complex)
+    ss = np.zeros((len(sso.e_ops), sso.N_store), dtype=complex)
+
+    # reseed the random number generator so that forked
+    # processes do not get the same sequence of random numbers
+    np.random.seed((n+1) * (sso.ntraj + 11) + np.random.randint(0, 4294967295 // (sso.ntraj + 1)))
+
+    poisson = False
+    if sso.noise is not None:
+        dW = sso.noise[n]
+    elif sso.generate_noise:
+        dW = sso.generate_noise(N_store, N_substeps, d2_len, n, dt)
+    elif sso.homogeneous:
+        dW = np.sqrt(dt) * np.random.randn(N_store, N_substeps, d2_len)
+    else:
+        poisson = True
+        dW = np.zeros(N_store, N_substeps, d2_len)
+        
+
+    states_list = []
+    measurements = np.zeros((len(times), len(sso.s_m_ops), d2_len),
+                            dtype=complex)
+
+    for t_idx, t in enumerate(times):
+        if sso.s_e_ops:
+            for e_idx, e in enumerate(sso.s_e_ops):
+                s = cy_expect_rho_vec(e.data, rho_t, 0)
+                expect[e_idx, t_idx] += s
+                ss[e_idx, t_idx] += s ** 2
+
+        if sso.store_states or not sso.s_e_ops:
+            states_list.append(Qobj(vec2mat(rho_t), dims=dims))
+
+        rho_prev = np.copy(rho_t)
+
+        for j in range(N_substeps):
+            if poisson:
+                dW_poisson = np.zeros(d2_len)
+                for a_idx, A in enumerate(A_ops):
+                    if not sso.td[1]:
+                        dw_expect = cy_expect_rho_vec(A[2], rho_t, 1) * dt
+                    else:
+                        dw_expect = cy_expect_rho_vec(A[2](t + dt * j).data, rho_t, 1) * dt
+                    if dw_expect > 0:
+                        dW_poisson[a_idx] = np.random.poisson(dw_expect, d2_len)
+                dW[t_idx, j, :] = dW_poisson
+
+            rho_t = sso.rhs(L, rho_t, t + dt * j, dt, A_ops,
+                            dW[t_idx, j, :], d1, d2, sso.args, sso.td)
+
+        if sso.store_measurement:
+            for m_idx, m in enumerate(sso.s_m_ops):
+                for dW_idx, dW_factor in enumerate(sso.dW_factors):
+                    if m[dW_idx]:
+                        m_expt = cy_expect_rho_vec(m[dW_idx].data, rho_prev, 0)
+                    else:
+                        m_expt = 0
+                    measurements[t_idx, m_idx, dW_idx] = m_expt + dW_factor * \
+                        dW[m_idx, t_idx, :, dW_idx].sum() / (dt * N_substeps)
+
+    if d2_len == 1:
+        measurements = measurements.squeeze(axis=(2))
+
+    return states_list, dW, measurements, expect, ss
+
+
 
 #
 #   Hamiltonian deterministic evolution
@@ -809,7 +890,7 @@ def prep_sc_ops_homodyne_rho(H, c_ops, sc_ops, dt, td):
             L += lindblad_dissipator(sc, data_only=True) * dt
             A += [[spre(sc).data + spost(sc.dag()).data]]
 
-    else not td[1]:
+    elif not td[1]:
         # sc_ops do not depend on time
         L = td_liouvillian(H, c_ops=c_ops).data * dt
         A = []
@@ -824,7 +905,7 @@ def prep_sc_ops_homodyne_rho(H, c_ops, sc_ops, dt, td):
         for sc in sc_ops:
             L += lindblad_dissipator(sc, data_only=True) * dt
             td_sc = td_Qobj(sc)
-            A += [[td_sc.apply(spre) + td_sc.apply(spost)]]
+            A += [[td_sc.apply(spre) + td_sc.dag().apply(spost)]]
     return L, A
 
 def prep_sc_ops_heterodyne_rho(H, c_ops, sc_ops, dt, td):
@@ -837,7 +918,7 @@ def prep_sc_ops_heterodyne_rho(H, c_ops, sc_ops, dt, td):
             A += [[ 1.0  / np.sqrt(2) * (spre(sc).data + spost(sc.dag()).data)]]
             A += [[-1.0j / np.sqrt(2) * (spre(sc).data - spost(sc.dag()).data)]]
 
-    else not td[1]:
+    elif not td[1]:
         # sc_ops do not depend on time
         L = td_liouvillian(H, c_ops=c_ops).data * dt
         A = []
@@ -853,8 +934,8 @@ def prep_sc_ops_heterodyne_rho(H, c_ops, sc_ops, dt, td):
         for sc in sc_ops:
             L += td_lindblad_dissipator(sc) * dt
             td_sc = td_Qobj(sc)
-            A += [[ 1.0  / np.sqrt(2) * (td_sc.apply(spre) + td_sc.apply(spost))]]
-            A += [[-1.0j / np.sqrt(2) * (td_sc.apply(spre) - td_sc.apply(spost))]]
+            A += [[ 1.0  / np.sqrt(2) * (td_sc.apply(spre) + td_sc.dag().apply(spost))]]
+            A += [[-1.0j / np.sqrt(2) * (td_sc.apply(spre) - td_sc.dag().apply(spost))]]
     return L, A
 
 def prep_sc_ops_photocurrent_rho(H, c_ops, sc_ops, dt, td):
@@ -864,18 +945,26 @@ def prep_sc_ops_photocurrent_rho(H, c_ops, sc_ops, dt, td):
         A = []
         for sc in sc_ops:
             L += lindblad_dissipator(sc, data_only=True) * dt
-            A += [[spre(n).data + spost(n).data, (spre(c) * spost(c.dag())).data]]
+            n = sc.dag() * sc
+            A += [[spre(n).data + spost(n).data, 
+                   (spre(c) * spost(c.dag())).data,
+                   spre(n).data]]
 
-    else not td[1]:
+    elif not td[1]:
         # sc_ops do not depend on time
         L = td_liouvillian(H, c_ops=c_ops) * dt
         A = []
         for sc in sc_ops:
             L += lindblad_dissipator(sc) * dt
-            A += [[spre(n).data + spost(n).data, (spre(c) * spost(c.dag())).data]]
+            n = sc.dag() * sc
+            A += [[spre(n).data + spost(n).data, 
+                   (spre(c) * spost(c.dag())).data,
+                   spre(n).data]]
 
     else:
         def _cdc(c):
+            return c*c.dag()
+        def _cdc2(c):
             return spre(c) * spost(c.dag())
 
         td[0] = True
@@ -884,8 +973,10 @@ def prep_sc_ops_photocurrent_rho(H, c_ops, sc_ops, dt, td):
         for sc in sc_ops:
             L += td_lindblad_dissipator(sc) * dt
             td_sc = td_Qobj(sc)
-            A += [[td_sc.apply(spre) + td_sc.apply(spost),
-                   td_sc.apply(_cdc)]]
+            n = sc.apply(_cdc)._f_norm2()
+            A += [[n.apply(spre) + n.apply(spost),
+                   td_sc.apply(_cdc)._f_norm2(),
+                   n.apply(spre)]]
     return L, A
 
 
@@ -938,7 +1029,7 @@ def d2_rho_milstein(t, rho_vec, sc_ops, args, td):
         e1 = cy_expect_rho_vec(sc, rho_vec, 0)
         for d2 in d2_vec:
             e2 = cy_expect_rho_vec(sc, d2, 0)
-            dd2 += = [spmv(sc, d2) - e2 * rho_vec - e1 * d2]
+            dd2 += [spmv(sc, d2) - e2 * rho_vec - e1 * d2]
 
     return np.vstack([d2_vec] + dd2).reshape((len_sc,len_sc,-1))
 
@@ -1028,7 +1119,7 @@ def d1_psi_heterodyne(t, psi, A, args, td):
     """
     d1 = np.zeros(len(psi))
     for sc in A:
-        e_C = cy_expect_psi(sc[0] psi, 0)
+        e_C = cy_expect_psi(sc[0], psi, 0)
         e_Cd = cy_expect_psi(sc[1], psi, 0)
         d1 += (-0.5 * spmv(sc[4], psi) +
                 0.5 * e_Cd * spmv(sc[0], psi) -
@@ -1166,7 +1257,7 @@ def d2_psi_photocurrent_td(t, psi, A, args, td):
 #
 #   Stochastic schemes
 #
-def _rhs_euler_maruyama(vec_t, t, dt, H, sc_ops, dW, d1, d2, args, td):
+def _rhs_euler_maruyama(H, vec_t, t, dt, sc_ops, dW, d1, d2, args, td):
     """
     Euler-Maruyama rhs function for both master eq and schrodinger eq.
 
@@ -1178,7 +1269,7 @@ def _rhs_euler_maruyama(vec_t, t, dt, H, sc_ops, dW, d1, d2, args, td):
     dvec_t += np.dot(dW, d2_vec)
     return vec_t + dvec_t
 
-def _rhs_milstein(vec_t, t, dt, H, sc_ops, dW, d1, d2, args, td):
+def _rhs_milstein(H, vec_t, t, dt, sc_ops, dW, d1, d2, args, td):
     """
     Milstein rhs function for both master eq and schrodinger eq.
 
@@ -1205,7 +1296,7 @@ def _rhs_milstein(vec_t, t, dt, H, sc_ops, dW, d1, d2, args, td):
 
     return vec_t + dvec_t
 
-def _rhs_platen(vec_t, t, dt, H, sc_ops, dW, d1, d2, args, td):
+def _rhs_platen(H, vec_t, t, dt, sc_ops, dW, d1, d2, args, td):
     """
     Platen rhs function for both master eq and schrodinger eq.
     
