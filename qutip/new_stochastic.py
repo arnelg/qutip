@@ -59,7 +59,8 @@ from qutip.solver import Result
 from qutip.expect import expect, expect_rho_vec
 from qutip.superoperator import (spre, spost, mat2vec, vec2mat,
                                  liouvillian, lindblad_dissipator)
-from qutip.cy.spmatfuncs import cy_expect_psi_csr, spmv, cy_expect_rho_vec
+from qutip.cy.spmatfuncs import cy_expect_psi_csr, spmv, cy_expect_rho_vec, \
+                                cy_expect_psi
 from qutip.cy.stochastic import (cy_d1_rho_photocurrent,
                                  cy_d2_rho_photocurrent)
 from qutip.cy.fast_stochastic import cy_smesolve_fast_single_trajectory
@@ -282,7 +283,92 @@ class StochasticSolverOptions:
             if not isinstance(ops, Qobj):
                 self.td = True"""
 
-def make_d1d2(sso):
+def make_d1d2_se(sso):
+    if not sso.method in [None, 'homodyne', 'heterodyne', 'photocurrent']:
+        raise Exception("The method should be one of "+\
+                            "[None, 'homodyne', 'heterodyne', 'photocurrent']")
+    if sso.method == 'homodyne' or sso.method is None:
+        sso.LH, sso.A_ops = prep_sc_ops_homodyne_psi(sso.H,
+                                    sso.c_ops, sso.sc_ops, sso.dt, sso.td)
+        sso.d1 = d1_psi_homodyne
+        sso.d2 = d2_psi_homodyne
+        sso.d2_len = len(sso.sc_ops)
+        sso.homogeneous = True
+        sso.distribution = 'normal'
+        if not sso.dW_factors:
+            sso.dW_factors = np.array([1.]*sso.d2_len)
+        if not sso.m_ops:
+            sso.m_ops = []
+            if not sso.td[1]:
+                for c in sso.sc_ops:
+                    sso.m_ops += [(c + c.dag())]
+            else:
+                for c in sso.sc_ops:
+                    td_c = td_Qobj(c)
+                    sso.m_ops += [(td_c + td_c.dag())]
+
+    elif sso.method == 'heterodyne':
+        sso.LH, sso.A_ops = prep_sc_ops_heterodyne_psi(sso.H,
+                                    sso.c_ops, sso.sc_ops, sso.dt, sso.td)
+        sso.d1 = d1_psi_heterodyne
+        sso.d2 = d2_psi_heterodyne
+        sso.d2_len = 2*len(sso.sc_ops)
+        sso.homogeneous = True
+        sso.distribution = 'normal'
+        sc_ops_heterodyne = []
+        for sc in iter(sso.sc_ops):
+            if isinstance(sc, Qobj):
+                sc_ops_heterodyne += [sc / np.sqrt(2), -1.0j * sc / np.sqrt(2)]
+            elif isinstance(sc, list):
+                sc_ops_heterodyne += [[sc[0] / np.sqrt(2), sc[1]],
+                                      [-1.0j * sc[0] / np.sqrt(2), sc[1]]]
+
+        if not sso.dW_factors:
+            sso.dW_factors = np.array([np.sqrt(2)]*sso.d2_len)
+        else:
+            if len(sso.dW_factors) == len(sso.sc_ops):
+                dwf = []
+                for f in dW_factors:
+                    dwf += [f*np.sqrt(2), f*np.sqrt(2)]
+                sso.dW_factors = np.array(dwf)
+
+        if not sso.m_ops:
+            sso.m_ops = []
+            if not sso.td[1]:
+                for c in sso.sc_ops:
+                    sso.m_ops += [(c + c.dag()), -1j * (c - c.dag()) ]
+            else:
+                for c in sso.sc_ops:
+                    td_c = td_Qobj(c)
+                    sso.m_ops += [(td_c + td_c.dag()),
+                                  -1j * (td_c - td_c.dag()) ]
+
+        sso.sc_ops = sc_ops_heterodyne
+
+    elif sso.method == 'photocurrent':
+        sso.LH, sso.A_ops =  prep_sc_ops_photocurrent_psi(sso.H,
+                                    sso.c_ops, sso.sc_ops, sso.dt, sso.td)
+        if any(sso.td):
+            sso.d1 = d1_psi_photocurrent
+            sso.d2 = d2_psi_photocurrent
+        sso.d2_len = len(sso.sc_ops)
+        sso.homogeneous = False
+        sso.distribution = 'poisson'
+        if not sso.dW_factors:
+            sso.dW_factors = np.array([1.]*sso.d2_len)
+        if not sso.m_ops:
+            sso.m_ops = [None for c in sso.sc_ops]
+        if not sso.m_ops:
+            sso.m_ops = []
+            if not sso.td[1]:
+                for c in sso.sc_ops:
+                    sso.m_ops += [c]
+            else:
+                for c in sso.sc_ops:
+                    td_c = td_Qobj(c)
+                    sso.m_ops += [td_c]
+
+def make_d1d2_me(sso):
     if not sso.method in [None, 'homodyne', 'heterodyne', 'photocurrent']:
         raise Exception("The method should be one of "+\
                             "[None, 'homodyne', 'heterodyne', 'photocurrent']")
@@ -365,8 +451,8 @@ def make_d1d2(sso):
                     td_c = td_Qobj(c)
                     sso.m_ops += [td_c.apply(spre)]
 
-
-def new_ssesolve(H, psi0, times, sc_ops=[], e_ops=[], _safe_mode=True, **kwargs):
+def new_ssesolve(H, psi0, times, sc_ops=[], e_ops=[],
+                 _safe_mode=True, **kwargs):
     """
     Solve the stochastic Schrödinger equation. Dispatch to specific solvers
     depending on the value of the `solver` keyword argument.
@@ -418,62 +504,71 @@ def new_ssesolve(H, psi0, times, sc_ops=[], e_ops=[], _safe_mode=True, **kwargs)
     sso = StochasticSolverOptions(H=H, state0=psi0, times=times,
                                   sc_ops=sc_ops, e_ops=e_ops, **kwargs)
 
-    if sso.generate_A_ops is None:
-        sso.generate_A_ops = _generate_psi_A_ops
+    sso.me = False
+    sso.dt = (times[1] - times[0]) / sso.nsubsteps
 
-    if (sso.d1 is None) or (sso.d2 is None):
-
-        if sso.method == 'homodyne':
-            sso.d1 = d1_psi_homodyne
-            sso.d2 = d2_psi_homodyne
-            sso.d2_len = 1
-            sso.homogeneous = True
-            sso.distribution = 'normal'
-            if "dW_factors" not in kwargs:
-                sso.dW_factors = np.array([1])
-            if "m_ops" not in kwargs:
-                sso.m_ops = [[c + c.dag()] for c in sso.sc_ops]
-
-        elif sso.method == 'heterodyne':
-            sso.d1 = d1_psi_heterodyne
-            sso.d2 = d2_psi_heterodyne
-            sso.d2_len = 2
-            sso.homogeneous = True
-            sso.distribution = 'normal'
-            if "dW_factors" not in kwargs:
-                sso.dW_factors = np.array([np.sqrt(2), np.sqrt(2)])
-            if "m_ops" not in kwargs:
-                sso.m_ops = [[(c + c.dag()), (-1j) * (c - c.dag())]
-                             for idx, c in enumerate(sso.sc_ops)]
-
-        elif sso.method == 'photocurrent':
-            sso.d1 = d1_psi_photocurrent
-            sso.d2 = d2_psi_photocurrent
-            sso.d2_len = 1
-            sso.homogeneous = False
-            sso.distribution = 'poisson'
-
-            if "dW_factors" not in kwargs:
-                sso.dW_factors = np.array([1])
-            if "m_ops" not in kwargs:
-                sso.m_ops = [[None] for c in sso.sc_ops]
-
+    #Is any of the rhs, (d1,d2), noise supplied?
+    sso.custom = [False, False, False, False]
+    if sso.rhs:
+        sso.custom[0] = True
+    if sso.d1 or sso.d2:
+        if sso.d1 and sso.d2:
+            sso.custom[1] = True
         else:
-            raise Exception("Unrecognized method '%s'." % sso.method)
+            raise Exception("Must define both d1 and d2 or none of them")
+    if sso.generate_noise:
+        sso.custom[2] = True
+    if sso.noise:
+        sso.custom[3] = True
 
-    if sso.distribution == 'poisson':
-        sso.homogeneous = False
+    sso.td = [False, False]
+    if not isinstance(H, Qobj):
+        sso.td[0] = True
+    for ops in sc_ops:
+        if not isinstance(ops, Qobj):
+            sso.td[1] = True
+
+    if not sso.custom[1]:
+        make_d1d2_se(sso)
+    else:
+        sso.A_ops = sc_ops
+        sso.d2_len = len(sso.sc_ops)
+        if any(sso.td):
+            sso.LH = td_Qobj(H)
+        else:
+            sso.LH = H
+            #sso.H_rhs = _rhs_deterministic
+        if sso.dW_factors is None:
+            sso.dW_factors =  np.ones(d2_len)
+        if sso.m_ops is None:
+            sso.m_ops = []
+            if not sso.td[1]:
+                for c in sso.sc_ops:
+                    sso.m_ops += [c]
+            else:
+                for c in sso.sc_ops:
+                    td_c = td_Qobj(c)
+                    sso.m_ops += [td_c]
 
     if sso.solver == 'euler-maruyama' or sso.solver is None:
-        sso.rhs = _rhs_psi_euler_maruyama
+        sso.rhs = _rhs_euler_maruyama
+
+    elif sso.method == 'photocurrent':
+        raise Exception("Only euler-maruyama supports photocurrent")
 
     elif sso.solver == 'platen':
-        sso.rhs = _rhs_psi_platen
+        sso.rhs = _rhs_platen
+
+    elif sso.method == 'heterodyne':
+        raise Exception("Milstein do not supports heterodyne")
+
+    elif sso.solver == 'milstein':
+        sso.rhs = _rhs_milstein
 
     else:
         raise Exception("Unrecognized solver '%s'." % sso.solver)
 
-    res = _ssesolve_generic(sso, sso.options, sso.progress_bar)
+    res = _sesolve_generic(sso, sso.options, sso.progress_bar)
 
     if e_ops_dict:
         res.expect = {e: res.expect[n]
@@ -576,7 +671,7 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
             sso.td[1] = True
     #Set default d1,d2 if not supplied
     if not sso.custom[1]:
-        make_d1d2(sso)
+        make_d1d2_me(sso)
     else:
         sso.A_ops = sc_ops
         sso.d2_len = len(sso.sc_ops)
@@ -591,7 +686,7 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
             sso.m_ops = []
             if not sso.td[1]:
                 for c in sso.sc_ops:
-                    sso.m_ops += [c]
+                    sso.m_ops += [spre(c)]
             else:
                 for c in sso.sc_ops:
                     td_c = td_Qobj(c)
@@ -726,7 +821,7 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
     if isinstance(sso.rhs, int):
         res = _smesolve_fast(sso, sso.options, sso.progress_bar)
     else:
-        res = _smesolve_generic(sso, sso.options, sso.progress_bar)
+        res = _sesolve_generic(sso, sso.options, sso.progress_bar)
 
     if e_ops_dict:
         res.expect = {e: res.expect[n]
@@ -735,7 +830,7 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
     return res
 
 
-def _smesolve_generic(sso, options, progress_bar):
+def _sesolve_generic(sso, options, progress_bar):
     """
     Internal function. See smesolve.
     """
@@ -745,9 +840,9 @@ def _smesolve_generic(sso, options, progress_bar):
     sso.N_store = len(sso.times)
     sso.dt = (sso.times[1] - sso.times[0]) / sso.nsubsteps
     nt = sso.ntraj
+    sso.s_m_ops = sso.m_ops
 
     data = Result()
-    data.solver = "smesolve"
     data.times = sso.times
     data.expect = np.zeros((len(sso.e_ops), sso.N_store), dtype=complex)
     data.ss = np.zeros((len(sso.e_ops), sso.N_store), dtype=complex)
@@ -755,14 +850,14 @@ def _smesolve_generic(sso, options, progress_bar):
     data.measurement = []
 
     if sso.me:
+        data.solver = "smesolve"
         # Master equation
         task = _smesolve_single_trajectory
-
         # use .data instead of Qobj ?
         sso.s_e_ops = [spre(e) for e in sso.e_ops]
-        sso.s_m_ops = sso.m_ops
 
     else:
+        data.solver = "ssesolve"
         # Schrodinger equation
         task = _ssesolve_single_trajectory
 
@@ -871,14 +966,13 @@ def _smesolve_single_trajectory(n, sso):
                         dw_expect = cy_expect_rho_vec(A[2](t + dt * j).data,
                                                       rho_t, 1) * dt
                     if dw_expect > 0:
-                        dW_poisson = np.random.poisson(dw_expect, d2_len)
+                        dW_poisson[a_idx] = np.random.poisson(dw_expect, d2_len)
                 dW[t_idx, j, :] = dW_poisson
 
             rho_t = sso.rhs(L, rho_t, t + dt * j, dt, A_ops,
                             dW[t_idx, j, :], d1, d2, sso.args, sso.td)
 
         if sso.store_measurement:
-
             for idx, (m, dW_factor) in enumerate(zip(sso.s_m_ops,
                                                      sso.dW_factors)):
                 if m:
@@ -896,7 +990,93 @@ def _smesolve_single_trajectory(n, sso):
 
     return states_list, dW, measurements, expect, ss
 
+def _ssesolve_single_trajectory(n, sso):
+    """
+    Internal function. See ssesolve.
+    """
+    dt = sso.dt
+    times = sso.times
+    d1, d2 = sso.d1, sso.d2
+    d2_len = sso.d2_len
+    e_ops = sso.e_ops
+    H = sso.LH
+    N_substeps = sso.nsubsteps
+    A_ops = sso.A_ops
+    N_store = sso.N_store
 
+    expect = np.zeros((len(sso.e_ops), sso.N_store), dtype=complex)
+    ss = np.zeros((len(sso.e_ops), sso.N_store), dtype=complex)
+
+    psi_t = sso.state0.full().ravel()
+    dims = sso.state0.dims
+
+    # reseed the random number generator so that forked
+    # processes do not get the same sequence of random numbers
+    np.random.seed((n+1) * (sso.ntraj + 11) +
+                   np.random.randint(0, 4294967295 // (sso.ntraj + 1)))
+
+    poisson = False
+    if sso.noise is not None:
+        dW = sso.noise[n]
+    elif sso.generate_noise:
+        dW = sso.generate_noise(N_store, N_substeps, d2_len, n, dt)
+    elif sso.homogeneous:
+        dW = np.sqrt(dt) * np.random.randn(N_store, N_substeps, d2_len)
+    else:
+        poisson = True
+        dW = np.zeros((N_store, N_substeps, d2_len))
+
+    states_list = []
+    measurements = np.zeros((len(times), len(sso.m_ops)),
+                            dtype=complex)
+
+    for t_idx, t in enumerate(times):
+        if e_ops:
+            for e_idx, e in enumerate(e_ops):
+                s = cy_expect_psi_csr(e.data.data,
+                                      e.data.indices,
+                                      e.data.indptr, psi_t, 0)
+                expect[e_idx, t_idx] += s
+                ss[e_idx, t_idx] += s ** 2
+        else:
+            states_list.append(Qobj(psi_t, dims=dims))
+
+        for j in range(N_substeps):
+            if poisson:
+                dW_poisson = np.zeros(d2_len)
+                for a_idx, A in enumerate(A_ops):
+                    if not sso.td[1]:
+                        dw_expect = cy_expect_psi_vec(A[1], rho_t, 1) * dt
+                    else:
+                        dw_expect = cy_expect_psi_vec(A[1](t + dt * j).data,
+                                                      rho_t, 1) * dt
+                    if dw_expect > 0:
+                        dW_poisson[a_idx] = np.random.poisson(dw_expect, d2_len)
+                dW[t_idx, j, :] = dW_poisson
+
+            psi_t = sso.rhs(H, psi_t, t + dt * j, dt, A_ops,
+                            dW[t_idx, j, :], d1, d2, sso.args, sso.td)
+            # optionally renormalize the wave function
+            if sso.normalize:
+                psi_t /= norm(psi_t)
+
+        if sso.store_measurement:
+            for idx, (m, dW_factor) in enumerate(zip(sso.m_ops,
+                                                     sso.dW_factors)):
+                if m:
+                    if sso.td[1]:
+                        m_expt = cy_expect_psi(m(t).data, psi_t, 0)
+                    else:
+                        m_expt = cy_expect_psi(m.data, psi_t, 0)
+                else:
+                    m_expt = 0
+                measurements[t_idx, idx] = m_expt + dW_factor * \
+                        dW[t_idx, :, idx].sum() / (dt * N_substeps)
+
+    if d2_len == 1:
+        measurements = measurements.squeeze(axis=(1))
+
+    return states_list, dW, measurements, expect, ss
 
 #
 #   Hamiltonian deterministic evolution
@@ -1006,9 +1186,9 @@ def prep_sc_ops_photocurrent_rho(H, c_ops, sc_ops, dt, td):
         for sc in sc_ops:
             L += td_lindblad_dissipator(sc) * dt
             td_sc = td_Qobj(sc)
-            n = sc.apply(_cdc)._f_norm2()
+            n = td_sc.apply(_cdc)._f_norm2()
             A += [[n.apply(spre) + n.apply(spost),
-                   td_sc.apply(_cdc)._f_norm2(),
+                   td_sc.apply(_cdc2)._f_norm2(),
                    n.apply(spre)]]
     return L, A
 
@@ -1096,25 +1276,66 @@ def d2_rho_photocurrent(t, rho_vec, A, args, td):
 #   d1 and d2 functions for common schemes (Schrodinger)
 #
 def prep_sc_ops_homodyne_psi(H, c_ops, sc_ops, dt, td):
-    H = (H*-1.0j).data * dt
+    if not td[0]:
+        H = -1.0j*H.data * dt
+    else:
+        H = td_Qobj(H)*-1.0j * dt
+
     A = []
-    for sc in sc_ops:
-        A += [[sc.data, (sc + sc.dag()).data, (c.dag() * c).data]]
+    if not td[1]:
+        for sc in sc_ops:
+            A += [[sc.data, (sc + sc.dag()).data, (sc.dag() * sc).data]]
+    else:
+        def _cdc(c):
+            return c.dag()*c
+
+        sc_t = [td_Qobj(sc) for sc in sc_ops]
+        for sc in sc_t:
+            n = sc.apply(_cdc)._f_norm2()
+            A += [[sc, (sc + sc.dag()), n]]
     return H,A
 
 def prep_sc_ops_heterodyne_psi(H, c_ops, sc_ops, dt, td):
-    H = (H*-1.0j).data * dt
+    if not td[0]:
+        H = -1.0j*H.data * dt
+    else:
+        H = td_Qobj(H)*-1.0j * dt
+
     A = []
-    for sc in sc_ops:
-        A.append([c.data, c.dag().data, (c + c.dag()).data,
-                (c - c.dag()).data, (c.dag() * c).data])
+    if not td[1]:
+        for sc in sc_ops:
+            A.append([sc.data, sc.dag().data, (sc + sc.dag()).data,
+                     (sc - sc.dag()).data, (sc.dag() * sc).data])
+    else:
+        def _cdc(c):
+            return c.dag()*c
+
+        sc_t = [td_Qobj(sc) for sc in sc_ops]
+        for sc in sc_t:
+            cd = sc.dag()
+            n = sc.apply(_cdc)._f_norm2()
+            A.append([sc, cd, sc + cd,
+                     sc - cd, n])
     return H,A
 
 def prep_sc_ops_photocurrent_psi(H, c_ops, sc_ops, dt, td):
-    H = (H*-1.0j).data * dt
+    if not td[0]:
+        H = H.data * -1.0j * dt
+    else:
+        H = td_Qobj(H)*-1.0j * dt
+
     A = []
-    for sc in sc_ops:
-        A += [[sc.data, (c.dag() * c).data]]
+    if not td[1]:
+        for sc in sc_ops:
+            A += [[sc.data, (sc.dag() * sc).data]]
+    else:
+        def _cdc(c):
+            return c.dag()*c
+        sc_t = [td_Qobj(sc) for sc in sc_ops]
+        for sc in sc_t:
+            n = sc.apply(_cdc)._f_norm2()
+            A += [[sc, n]]
+
     return H,A
 
 
@@ -1124,8 +1345,12 @@ def d1_psi_homodyne(t, psi, A, args, td):
         D_1(C, \psi) = \\frac{1}{2}(\\langle C + C^\\dagger\\rangle\\C psi -
         C^\\dagger C\\psi - \\frac{1}{4}\\langle C + C^\\dagger\\rangle^2\\psi)
     """
-    d1 = np.zeros(len(psi))
-    for sc in A:
+    d1 = np.zeros(len(psi), dtype=complex)
+    if td:
+        sc_t = [[sc[0](t).data,sc[1](t).data,sc[2](t).data] for sc in A]
+    else:
+        sc_t = A
+    for sc in sc_t:
         e1 = cy_expect_psi(sc[1], psi, 0)
         d1 += 0.5 * (e1 * spmv(sc[0], psi) -
                     spmv(sc[2], psi) -
@@ -1138,7 +1363,11 @@ def d2_psi_homodyne(t, psi, A, args, td):
         D_2(\psi, t) = (C - \\frac{1}{2}\\langle C + C^\\dagger\\rangle)\\psi
     """
     d2 = []
-    for sc in A:
+    if td:
+        sc_t = [[sc[0](t).data,sc[1](t).data] for sc in A]
+    else:
+        sc_t = A
+    for sc in sc_t:
         e1 = cy_expect_psi(sc[1], psi, 0)
         d2 += [spmv(sc[0], psi) - 0.5 * e1 * psi]
     return np.vstack(d2)
@@ -1150,11 +1379,15 @@ def d1_psi_heterodyne(t, psi, A, args, td):
         \\langle C^\\dagger \\rangle C +
         \\frac{1}{2}\\langle C \\rangle\\langle C^\\dagger \\rangle))\psi
     """
-    d1 = np.zeros(len(psi))
-    for sc in A:
+    d1 = np.zeros(len(psi), dtype=complex)
+    if td:
+        sc_t = [[sc[0](t).data, sc[1](t).data, sc[4](t).data] for sc in A]
+    else:
+        sc_t = A
+    for sc in sc_t:
         e_C = cy_expect_psi(sc[0], psi, 0)
         e_Cd = cy_expect_psi(sc[1], psi, 0)
-        d1 += (-0.5 * spmv(sc[4], psi) +
+        d1 += (-0.5 * spmv(sc[2], psi) +
                 0.5 * e_Cd * spmv(sc[0], psi) -
                 0.25 * e_C * e_Cd * psi)
     return d1
@@ -1167,11 +1400,15 @@ def d2_psi_heterodyne(t, psi, A, args, td):
         D_{2,2}(\psi, t) = -i\\sqrt(1/2) (C - \\langle Y \\rangle) \\psi
     """
     d2 = []
-    for sc in A:
-        X = 0.5 * cy_expect_psi(sc[2], psi, 0)
-        Y = 0.5 * cy_expect_psi(sc[3], psi, 0)
-        d2 += [np.sqrt(0.5) * (spmv(A[0], psi) - X * psi)]
-        d2 += [-1.0j * np.sqrt(0.5) * (spmv(A[0], psi) - Y * psi)]
+    if td:
+        sc_t = [[sc[0](t).data, sc[2](t).data, sc[3](t).data] for sc in A]
+    else:
+        sc_t = [[sc[0], sc[2], sc[3]] for sc in A]
+    for sc in sc_t:
+        X = 0.5 * cy_expect_psi(sc[1], psi, 0)
+        Y = 0.5 * cy_expect_psi(sc[2], psi, 0)
+        d2 += [np.sqrt(0.5) * (spmv(sc[0], psi) - X * psi)]
+        d2 += [-1.0j * np.sqrt(0.5) * (spmv(sc[0], psi) - Y * psi)]
     return np.vstack(d2)
 
 def d1_psi_photocurrent(t, psi, A, args, td):
@@ -1195,90 +1432,6 @@ def d2_psi_photocurrent(t, psi, A, args, td):
     d2 = []
     for sc in A:
         psi_1 = spmv(A[0], psi)
-        n1 = norm(psi_1)
-        if n1 != 0:
-            d2 += [psi_1 / n1 - psi]
-        else:
-            d2 += [- psi]
-    return np.vstack(d2)
-
-def d1_psi_homodyne_td(t, psi, A, args, td):
-    """
-    .. math::
-        D_1(C, \psi) = \\frac{1}{2}(\\langle C + C^\\dagger\\rangle\\C psi -
-        C^\\dagger C\\psi - \\frac{1}{4}\\langle C + C^\\dagger\\rangle^2\\psi)
-    """
-    d1 = np.zeros(len(psi))
-    for sc in A:
-        e1 = cy_expect_psi(sc[1](t), psi, 0)
-        d1 += 0.5 * (e1 * spmv(sc[0](t), psi) -
-                    spmv(sc[2](t), psi) -
-                    0.25 * e1 ** 2 * psi)
-    return d1
-
-def d2_psi_homodyne_td(t, psi, A, args, td):
-    """
-    .. math::
-        D_2(\psi, t) = (C - \\frac{1}{2}\\langle C + C^\\dagger\\rangle)\\psi
-    """
-    d2 = []
-    for sc in A:
-        e1 = cy_expect_psi(sc[1](t), psi, 0)
-        d2 += [spmv(sc[0](t), psi) - 0.5 * e1 * psi]
-    return np.vstack(d2)
-
-def d1_psi_heterodyne_td(t, psi, A, args, td):
-    """
-    .. math::
-        D_1(\psi, t) = -\\frac{1}{2}(C^\\dagger C -
-        \\langle C^\\dagger \\rangle C +
-        \\frac{1}{2}\\langle C \\rangle\\langle C^\\dagger \\rangle))\psi
-    """
-    d1 = np.zeros(len(psi))
-    for sc in A:
-        e_C = cy_expect_psi(sc[0](t), psi, 0)
-        e_Cd = cy_expect_psi(sc[1](t), psi, 0)
-        d1 += (-0.5 * spmv(sc[4](t), psi) +
-                0.5 * e_Cd * spmv(sc[0](t), psi) -
-                0.25 * e_C * e_Cd * psi)
-    return d1
-
-def d2_psi_heterodyne_td(t, psi, A, args, td):
-    """
-        X = \\frac{1}{2}(C + C^\\dagger)
-        Y = \\frac{1}{2}(C - C^\\dagger)
-        D_{2,1}(\psi, t) = \\sqrt(1/2) (C - \\langle X \\rangle) \\psi
-        D_{2,2}(\psi, t) = -i\\sqrt(1/2) (C - \\langle Y \\rangle) \\psi
-    """
-    d2 = []
-    for sc in A:
-        X = 0.5 * cy_expect_psi(sc[2](t), psi, 0)
-        Y = 0.5 * cy_expect_psi(sc[3](t), psi, 0)
-        d2 += [np.sqrt(0.5) * (spmv(A[0](t), psi) - X * psi)]
-        d2 += [-1.0j * np.sqrt(0.5) * (spmv(A[0](t), psi) - Y * psi)]
-    return np.vstack(d2)
-
-def d1_psi_photocurrent_td(t, psi, A, args, td):
-    """
-    Note: requires poisson increments
-    .. math::
-        D_1(\psi, t) = - \\frac{1}{2}(C^\dagger C \psi - ||C\psi||^2 \psi)
-    """
-    d1 = np.zeros(len(psi))
-    for sc in A:
-        d1 += (-0.5 * (spmv(A[1](t), psi)
-                - norm(spmv(A[0](t), psi)) ** 2 * psi))
-    return d1
-
-def d2_psi_photocurrent_td(t, psi, A, args, td):
-    """
-    Note: requires poisson increments
-    .. math::
-        D_2(\psi, t) = C\psi / ||C\psi|| - \psi
-    """
-    d2 = []
-    for sc in A:
-        psi_1 = spmv(A[0](t), psi)
         n1 = norm(psi_1)
         if n1 != 0:
             d2 += [psi_1 / n1 - psi]
