@@ -308,8 +308,8 @@ def make_d1d2_se(sso):
                     sso.m_ops += [(td_c + td_c.dag())]
 
     elif sso.method == 'heterodyne':
-        sso.LH, sso.A_ops = prep_sc_ops_heterodyne_psi(sso.H,
-                                    sso.c_ops, sso.sc_ops, sso.dt, sso.td)
+        sso.LH, sso.A_ops = prep_sc_ops_heterodyne_psi(sso.H, sso.c_ops,
+                                    sso.sc_ops, sso.dt, sso.td)
         sso.d1 = d1_psi_heterodyne
         sso.d2 = d2_psi_heterodyne
         sso.d2_len = 2*len(sso.sc_ops)
@@ -1347,7 +1347,7 @@ def d1_psi_homodyne(t, psi, A, args, td):
     """
     d1 = np.zeros(len(psi), dtype=complex)
     if td:
-        sc_t = [[sc[0](t).data,sc[1](t).data,sc[2](t).data] for sc in A]
+        sc_t = [[sc[0](t).data, sc[1](t).data, sc[2](t).data] for sc in A]
     else:
         sc_t = A
     for sc in sc_t:
@@ -1364,7 +1364,7 @@ def d2_psi_homodyne(t, psi, A, args, td):
     """
     d2 = []
     if td:
-        sc_t = [[sc[0](t).data,sc[1](t).data] for sc in A]
+        sc_t = [[sc[0](t).data, sc[1](t).data] for sc in A]
     else:
         sc_t = A
     for sc in sc_t:

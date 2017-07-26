@@ -171,6 +171,12 @@ class td_Qobj:
         self.op_call = None
         self.valid = True
 
+        if isinstance(Q_object, list) and len(Q_object) == 2:
+            if isinstance(Q_object[0], Qobj) and not \
+                isinstance(Q_object[1], (Qobj, list)):
+                        # The format is [Qobj, f/str]
+                        Q_object = [Q_object]
+
         op_type = self._td_format_check_single(Q_object, tlist)
         self.op_type = op_type
         self.ops = []
@@ -560,7 +566,7 @@ def """ + func_name + "(double t"
         res._f_conj()
         return res
 
-    # When name fixed, put in stochastic 
+    # When name fixed, put in stochastic
     def norm(self):
         """return a.dag * a """
         if not self.N_obj == 1:
@@ -632,10 +638,10 @@ def """ + func_name + "(double t"
         for op in self.ops:
             if op[3] == 1:
                 op[1] = _norm2(op[1])
-                op[2] = op[1]            
+                op[2] = op[1]
             elif op[3] == 2:
                 op[1] = _norm2(op[1])
-                op[2] = "norm(" + op[2] + ")"            
+                op[2] = "norm(" + op[2] + ")"
             elif op[3] == 3:
                 op[2] = np.abs(op[2])**2
         return self
@@ -645,10 +651,10 @@ def """ + func_name + "(double t"
         for op in self.ops:
             if op[3] == 1:
                 op[1] = _conj(op[1])
-                op[2] = op[1]            
+                op[2] = op[1]
             elif op[3] == 2:
                 op[1] = _conj(op[1])
-                op[2] = "conj(" + op[2] + ")"            
+                op[2] = "conj(" + op[2] + ")"
             elif op[3] == 3:
                 op[2] = np.conj(op[2])
         return self
@@ -657,12 +663,12 @@ def """ + func_name + "(double t"
 def _interpolate(t, f_array, N, dt):
     # inbound?
     if t < 0.:
-        return f_array[0]    
-    if t > dt*(N-1): 
+        return f_array[0]
+    if t > dt*(N-1):
         return f_array[N-1]
 
     # On the boundaries, linear approximation
-    # Better sheme useful? 
+    # Better sheme useful?
     if t < dt:
         return f_array[0]*(dt-t)/dt + f_array[1]*t/dt
     if t > dt*(N-2):
@@ -743,7 +749,7 @@ def td_liouvillian(H, c_ops=[], chi=None):
 def td_lindblad_dissipator(a):
     """
     Lindblad dissipator (generalized) for a single collapse operator.
-    For the 
+    For the
 
     .. math::
 
