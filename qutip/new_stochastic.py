@@ -69,7 +69,7 @@ from qutip.parallel import serial_map
 from qutip.ui.progressbar import TextProgressBar
 from qutip.solver import Options, _solver_safety_check
 from qutip.settings import debug
-from qutip.td_qobj import td_liouvillian, td_Qobj
+from qutip.td_qobj import td_liouvillian, td_Qobj, td_lindblad_dissipator
 
 
 if debug:
@@ -401,8 +401,14 @@ def make_d1d2_me(sso):
         sso.homogeneous = True
         sso.distribution = 'normal'
         sc_ops_heterodyne = []
+
         for sc in iter(sso.sc_ops):
-            sc_ops_heterodyne += [sc / np.sqrt(2), -1.0j * sc / np.sqrt(2)]
+            if isinstance(sc, Qobj):
+                sc_ops_heterodyne += [sc / np.sqrt(2), -1.0j * sc / np.sqrt(2)]
+            elif isinstance(sc, list):
+                sc_ops_heterodyne += [[sc[0] / np.sqrt(2), sc[1]],
+                                      [-1.0j * sc[0] / np.sqrt(2), sc[1]]]
+            # sc_ops_heterodyne += [sc / np.sqrt(2), -1.0j * sc / np.sqrt(2)]
         if not sso.dW_factors:
             sso.dW_factors = np.array([np.sqrt(2)]*sso.d2_len)
         else:
@@ -576,7 +582,8 @@ def new_ssesolve(H, psi0, times, sc_ops=[], e_ops=[],
 
     return res
 
-def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True, debug=False, **kwargs):
+def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
+                 _safe_mode=True, debug=False, **kwargs):
     """
     Solve stochastic master equation. Dispatch to specific solvers
     depending on the value of the `solver` keyword argument.
@@ -705,7 +712,7 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
 
     fast = not (any(sso.custom[:3]) or any(sso.td) or
                 sso.distribution == 'poisson')
-
+    fast = False
     #Set the sso.rhs based on the method
     #sso.rhs is an int for fast (cython) code
     if sso.rhs:
@@ -756,11 +763,14 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
                 sso.d2 = d2_rho_milstein
 
         elif sso.td:
-            raise Exception("Only 'euler-maruyama', 'milstein' and 'platen' support time dependant cases")
+            raise Exception("Only 'euler-maruyama', 'milstein' and 'platen' " +
+                            "support time dependant cases")
         elif sso.custom[2]: # Custom noise function
-            raise Exception("Only 'euler-maruyama', 'milstein' and 'platen' support custom noise function")
+            raise Exception("Only 'euler-maruyama', 'milstein' and 'platen' " +
+                            "support custom noise function")
         elif not sso.method == 'homodyne': # Not yet done
-            raise Exception("Only 'euler-maruyama', 'milstein' and 'platen' support heterodyne")
+            raise Exception("Only 'euler-maruyama', 'milstein' and 'platen' " +
+                            "support heterodyne")
 
         elif sso.solver == 'milstein-imp':
             sso.generate_A_ops = _generate_A_ops_implicit
@@ -771,7 +781,8 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
                 if len(sc_ops) == 1:
                     sso.rhs = 25
                 else:
-                    raise Exception("'milstein-imp' : Only one stochastic operator is supported")
+                    raise Exception("'milstein-imp' : Only one stochastic " +
+                                    "operator is supported")
             else:
                 raise Exception("'milstein-imp' : Only homodyne is available")
 
@@ -782,7 +793,8 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
                 if len(sc_ops) == 1:
                     sso.rhs = 30
                 else:
-                    raise Exception("'taylor15' : Only one stochastic operator is supported")
+                    raise Exception("'taylor15' : Only one stochastic " +
+                                    "operator is supported")
             else:
                 raise Exception("'taylor15' : Only homodyne is available")
 
@@ -795,7 +807,8 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
                 if len(sc_ops) == 1:
                     sso.rhs = 35
                 else:
-                    raise Exception("'taylor15-imp' : Only one stochastic operator is supported")
+                    raise Exception("'taylor15-imp' : Only one stochastic " +
+                                    "operator is supported")
             else:
                 raise Exception("'taylor15-imp' : Only homodyne is available")
 
@@ -806,7 +819,8 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[], _safe_mode=True,
                 if len(sc_ops) == 1:
                     sso.rhs = 40
                 else:
-                    raise Exception("'pc-euler' : Only one stochastic operator is supported")
+                    raise Exception("'pc-euler' : Only one stochastic " +
+                                    "operator is supported")
             else:
                 raise Exception("'pc-euler' : Only homodyne is available")
 
@@ -1083,7 +1097,8 @@ def _ssesolve_single_trajectory(n, sso):
 #
 def _rhs_deterministic(H, vec_t, t, dt, args, td):
     """
-    Deterministic contribution to the density matrix / Hamiltonian for time-dependent cases
+    Deterministic contribution to the density matrix /
+    Hamiltonian for time-dependent cases
     """
     if td:
         return spmv(H(t).data, vec_t)
@@ -1116,7 +1131,7 @@ def prep_sc_ops_homodyne_rho(H, c_ops, sc_ops, dt, td):
         L = td_liouvillian(H, c_ops=c_ops) * dt
         A = []
         for sc in sc_ops:
-            L += lindblad_dissipator(sc, data_only=True) * dt
+            L += td_lindblad_dissipator(sc) * dt
             td_sc = td_Qobj(sc)
             A += [[td_sc.apply(spre) + td_sc.dag().apply(spost)]]
     return L, A
@@ -1147,8 +1162,10 @@ def prep_sc_ops_heterodyne_rho(H, c_ops, sc_ops, dt, td):
         for sc in sc_ops:
             L += td_lindblad_dissipator(sc) * dt
             td_sc = td_Qobj(sc)
-            A += [[ 1.0  / np.sqrt(2) * (td_sc.apply(spre) + td_sc.dag().apply(spost))]]
-            A += [[-1.0j / np.sqrt(2) * (td_sc.apply(spre) - td_sc.dag().apply(spost))]]
+            A += [[ 1.0  / np.sqrt(2) * (td_sc.apply(spre) +
+                                         td_sc.dag().apply(spost))]]
+            A += [[-1.0j / np.sqrt(2) * (td_sc.apply(spre) -
+                                         td_sc.dag().apply(spost))]]
     return L, A
 
 def prep_sc_ops_photocurrent_rho(H, c_ops, sc_ops, dt, td):
@@ -1531,7 +1548,8 @@ def _generate_A_ops_simple(H, c_ops, sc_ops, dt):
     L = liouvillian(H,c_ops=c_ops).data
     A_len = len(sc)
     temp = [spre(c).data + spost(c.dag()).data for c in sc]
-    tempL = (L + np.sum([lindblad_dissipator(c, data_only=True) for c in sc], axis=0)) # Lagrangian
+    tempL = (L + np.sum([lindblad_dissipator(c, data_only=True) for c in sc],
+                        axis=0)) # Lagrangian
 
     out = []
     out += temp
@@ -1595,7 +1613,8 @@ def _generate_A_ops_implicit(H, c_ops, sc_ops, dt):
     L = liouvillian(H,c_ops=c_ops).data
     A_len = len(sc)
     temp = [spre(c).data + spost(c.dag()).data for c in sc]
-    tempL = (L + np.sum([lindblad_dissipator(c, data_only=True) for c in sc], axis=0)) # Lagrangian
+    tempL = (L + np.sum([lindblad_dissipator(c, data_only=True) for c in sc],
+                        axis=0)) # Lagrangian
 
     out = []
     out += temp
