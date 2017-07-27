@@ -1093,6 +1093,87 @@ def _ssesolve_single_trajectory(n, sso):
     return states_list, dW, measurements, expect, ss
 
 #
+#   Call cython version
+#   Not Imlemented
+def _smesolve_fast(sso, options, progress_bar):
+    """
+    Internal function. See smesolve.
+    """
+    if debug:
+        logger.debug(inspect.stack()[0][3])
+
+    sso.N_store = len(sso.times)
+    sso.N_substeps = sso.nsubsteps
+    sso.dt = (sso.times[1] - sso.times[0]) / sso.N_substeps
+    nt = sso.ntraj
+
+    data = Result()
+    data.solver = "smesolve"
+    data.times = sso.times
+    data.expect = np.zeros((len(sso.e_ops), sso.N_store), dtype=complex)
+    data.ss = np.zeros((len(sso.e_ops), sso.N_store), dtype=complex)
+    data.noise = []
+    data.measurement = []
+
+    # Liouvillian for the deterministic part.
+    # needs to be modified for TD systems
+    sso.L = liouvillian(sso.H, sso.c_ops)
+
+    # pre-compute suporoperator operator combinations that are commonly needed
+    # when evaluating the RHS of stochastic master equations
+    sso.A_ops = sso.generate_A_ops(sso.sc_ops, sso.L.data, sso.dt)
+
+    # use .data instead of Qobj ?
+    sso.s_e_ops = [spre(e) for e in sso.e_ops]
+
+    if sso.m_ops:
+        sso.s_m_ops = [[spre(m) if m else None for m in m_op]
+                       for m_op in sso.m_ops]
+    else:
+        sso.s_m_ops = [[spre(c) for _ in range(sso.d2_len)]
+                       for c in sso.sc_ops]
+
+    map_kwargs = {'progress_bar': progress_bar}
+    map_kwargs.update(sso.map_kwargs)
+
+    task = cy_smesolve_fast_single_trajectory
+    task_args = (sso,)
+    task_kwargs = {}
+
+    results = sso.map_func(task, list(range(sso.ntraj)),
+                           task_args, task_kwargs, **map_kwargs)
+
+    for result in results:
+        states_list, dW, m, expect, ss = result
+        data.states.append(states_list)
+        data.noise.append(dW)
+        data.measurement.append(m)
+        data.expect += expect
+        data.ss += ss
+
+    # average density matrices
+    if options.average_states and np.any(data.states):
+        data.states = [sum([data.states[mm][n] for mm in range(nt)]).unit()
+                       for n in range(len(data.times))]
+
+    # average
+    data.expect = data.expect / nt
+
+    # standard error
+    if nt > 1:
+        data.se = (data.ss - nt * (data.expect ** 2)) / (nt * (nt - 1))
+    else:
+        data.se = None
+
+    # convert complex data to real if hermitian
+    data.expect = [np.real(data.expect[n, :])
+                   if e.isherm else data.expect[n, :]
+                   for n, e in enumerate(sso.e_ops)]
+
+    return data
+
+
+#
 #   Hamiltonian deterministic evolution
 #
 def _rhs_deterministic(H, vec_t, t, dt, args, td):
