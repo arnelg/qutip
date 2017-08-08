@@ -40,7 +40,8 @@ from types import FunctionType, BuiltinFunctionType
 import numpy as np
 from numbers import Number
 from qutip.superoperator import liouvillian, lindblad_dissipator
-
+from qutip.td_qobj_codegen import _compile_str_single, td_qobj_codegen
+from qutip.cy.spmatfuncs import (cy_expect_rho_vec, cy_expect_psi, spmv)
 
 class td_Qobj:
     """A class for representing time-dependent quantum objects,
@@ -168,8 +169,10 @@ class td_Qobj:
         self.args = args
         self.cte = None
         self.tlist = tlist
-        self.op_call = None
-        self.valid = True
+        self.fast = True
+        self.compiled = False
+        self.compiled_Qobj = None
+        self.compiled_ptr = None
 
         if isinstance(Q_object, list) and len(Q_object) == 2:
             if isinstance(Q_object[0], Qobj) and not \
@@ -185,12 +188,8 @@ class td_Qobj:
             if op_type == 0:
                 self.cte = Q_object
                 self.const = True
-                if Q_object.issuper:
-                    self.issuper = True
             elif op_type == 1:
-                # a function, no test to see if the
-                # function does return a Qobj.
-                self.op_call = Q_object
+                raise Exception("The Qobj must not already be a function")
             elif op_type == -1:
                 pass
 
@@ -204,33 +203,42 @@ class td_Qobj:
                     else:
                         self.cte += op
                 elif type_ == 1:
-                    self.ops.append([op[0], op[1], op[1], 1])
+                    try:
+                        n_args = op[1].__code__.co_argcount
+                        f_args = op[1].__code__.co_varnames[1:n_args]
+                        local_args = {}
+                        for fa in f_args:
+                            if fa in args:
+                                local_args[fa] = args[fa]
+                        self.ops.append([op[0], op[1], op[1], 1, local_args])
+                    except:
+                        self.ops.append([op[0], op[1], op[1], 1, args])
+                    self.fast = False
                 elif type_ == 2:
-                    self.ops.append([op[0], None, op[1], 2])
-                    compile_list.append((op[1], compile_count))
+                    local_args = {}
+                    for i in args:
+                        if i in op[1]:
+                            local_args[i] = args[i]
+                    self.ops.append([op[0], None, op[1], 2, local_args])
+                    compile_list.append((op[1], local_args, compile_count))
                     compile_count += 1
                 elif type_ == 3:
                     l = len(self.ops)
                     N = len(self.tlist)
                     dt = self.tlist[-1] / (N - 1)
                     self.ops.append([op[0], None,
-                                     op[1].copy(), 3])
+                                     op[1].copy(), 3, {}])
 
                     def from_array(t, l=l, *args, **kw_args):
                         return _interpolate(t, self.ops[l][2], N, dt)
 
                     self.ops[-1][1] = from_array
 
-#                    self.ops[-1][1] = lambda t, *args, l=l, **kw_args:
-#                                    (0 if (t > self.tlist[-1])
-#                                    else self.ops[l][2][int(
-#                                    round((len(self.tlist) - 1) *
-#                                    (t/self.tlist[-1])))])
                 else:
                     raise Exception("Should never be here")
 
             if compile_count:
-                str_funcs = self._compile_str_single(compile_list)
+                str_funcs = _compile_str_single(compile_list)
                 count = 0
                 for op in self.ops:
                     if op[3] == 2:
@@ -247,35 +255,6 @@ class td_Qobj:
             if not self.ops:
                 self.const = True
         self.N_obj = (len(self.ops) if self.dummy_cte else len(self.ops) + 1)
-
-
-    # Different function to get the state
-    def __call__(self, t):
-        if self.op_call is not None:
-            return self.op_call(t, **self.args)
-        op_t = self.cte
-        for part in self.ops:
-            op_t += part[0] * part[1](t, **self.args)
-        return op_t
-
-    def _td_array_to_str(self, op_np2, times):
-        """
-        Wrap numpy-array based time-dependence in the string-based
-        time dependence format
-        """
-        n = 0
-        str_op = []
-        np_args = {}
-
-        for op in op_np2:
-            td_array_name = "_td_array_%d" % n
-            H_td_str = '(0 if (t > %f) else %s[int(round(%d * (t/%f)))])' %\
-                (times[-1], td_array_name, len(times) - 1, times[-1])
-            np_args[td_array_name] = op[1]
-            str_op.append([op[0], H_td_str])
-            n += 1
-
-        return str_op, np_args
 
     def _td_format_check_single(self, Q_object, tlist=None):
         op_type = []
@@ -317,121 +296,43 @@ class td_Qobj:
             raise TypeError("Incorrect Q_object specification")
         return op_type
 
-    def _generate_op(self):
-        compiled_str_coeff = self._compile_str_()
-        if(len(self.args) == 0):
-            def str_func_with_np(t):
-                return compiled_str_coeff(t)
-        else:
-            def str_func_with_np(t):
-                return compiled_str_coeff(t, *(list(zip(*self.args))[1]))
+    def __call__(self, t):
+        op_t = self.cte
+        for part in self.ops:
+            op_t += part[0] * part[1](t, **part[4])
+        return op_t
 
-        return compiled_str_coeff
-
-    def _compile_str_single(self, compile_list):
-
-        import os
-        _cython_path = os.path.dirname(os.path.abspath(__file__)).replace(
-                    "\\", "/")
-        _include_string = "'"+_cython_path + "/cy/complex_math.pxi'"
-
-        all_str = ""
-        for op in compile_list:
-            all_str += op[0]
-
-        filename = "td_Qobj_"+str(hash(all_str))[1:]
-
-        Code = """
-# This file is generated automatically by QuTiP.
-
-import numpy as np
-cimport numpy as np
-cimport cython
-np.import_array()
-cdef extern from "numpy/arrayobject.h" nogil:
-    void PyDataMem_NEW_ZEROED(size_t size, size_t elsize)
-    void PyArray_ENABLEFLAGS(np.ndarray arr, int flags)
-from qutip.cy.spmatfuncs cimport spmvpy
-from qutip.cy.interpolate cimport interp, zinterp
-from qutip.cy.math cimport erf
-cdef double pi = 3.14159265358979323
-
-include """+_include_string+"\n"
-
-        for str_coeff in compile_list:
-            Code += self._str_2_code(str_coeff)
-
-        file = open(filename+".pyx", "w")
-        file.writelines(Code)
-        file.close()
-
-        str_func = []
-        imp = ' import '
-        self.str_func = []
-        for i in range(len(compile_list)):
-            func_name = '_str_factor_' + str(i)
-            import_code = compile('from ' + filename + ' import ' + func_name +
-                                  "\nstr_func.append(" + func_name + ")",
-                                  '<string>', 'exec')
-            exec(import_code, locals())
-
-        try:
-            os.remove(filename+".pyx")
-        except:
-            pass
-
-        return str_func
-
-    def _str_2_code(self, str_coeff):
-
-        func_name = '_str_factor_' + str(str_coeff[1])
-
-        Code = """
-
-@cython.boundscheck(False)
-@cython.wraparound(False)
-
-def """ + func_name + "(double t"
-        Code += self._get_arg_str()
-        Code += "):\n"
-        Code += "    return " + str_coeff[0] + "\n"
-
-        return Code
-
-    def _get_arg_str(self):
-        if len(self.args) == 0:
-            return ''
-
-        ret = ''
-        for name, value in self.args.items():
-            if isinstance(value, np.ndarray):
-                ret += ",\n        np.ndarray[np.%s_t, ndim=1] %s" % \
-                    (value.dtype.name, name)
+    def with_args(self, t, *args, **kw_args):
+        op_t = self.cte.copy()
+        for part in self.ops:
+            part_args = part[4].copy()
+            for pa in part_args:
+                if pa in kw_args:
+                    part_args[pa] = kw_args[pa]
+            if part[3] == 1:
+                op_t += part[0] * part[1](t, *args, **part_args)
             else:
-                if isinstance(value, (int, np.int32, np.int64)):
-                    kind = 'int'
-                elif isinstance(value, (float, np.float32, np.float64)):
-                    kind = 'float'
-                elif isinstance(value, (complex, np.complex128)):
-                    kind = 'complex'
-                ret += ",\n        " + kind + " " + name
-        return ret
+                op_t += part[0] * part[1](t, **part_args)
+        return op_t
 
     def copy(self):
         new = td_Qobj(self.cte.copy())
         new.const = self.const
-        new.op_call = self.op_call
         new.args = self.args
         new.tlist = self.tlist
         new.dummy_cte = self.dummy_cte
         new.op_type = self.op_type
         new.N_obj = self.N_obj
-        new.valid = self.valid
+        new.fast = self.fast
+        new.compiled = False
+        new.compiled_Qobj = None
+        new.compiled_ptr = None
 
         for l, op in enumerate(self.ops):
-            new.ops.append([None, None, None, None])
+            new.ops.append([None, None, None, None, None])
             new.ops[l][0] = op[0].copy()
             new.ops[l][3] = op[3]
+            new.ops[l][4] = op[4].copy()
             if new.ops[l][3] in [1, 2]:
                 new.ops[l][1] = op[1]
                 new.ops[l][2] = op[2]
@@ -447,7 +348,30 @@ def """ + func_name + "(double t"
 
         return new
 
+    def arguments(self, **kwargs):
+        self.args.update(kwargs)
+        self.compiled = False
+        self.compiled_code = None
+        for op in self.ops:
+            if op[3] == 1:
+                try:
+                    n_args = op[1].__code__.co_argcount
+                    f_args = op[1].__code__.co_varnames[1:n_args]
+                    local_args = {}
+                    for fa in f_args:
+                        if fa in args:
+                            local_args[fa] = args[fa]
+                    op[4] = local_args
+                except:
+                    op[4] = self.args
+            elif op[3] == 2:
+                local_args = {}
+                for i in self.args:
+                    if i in op[2]:
+                        local_args[i] = self.args[i]
+                op[4] = local_args
 
+    # Math function
     def __add__(self, other):
         res = self.copy()
         res += other
@@ -462,10 +386,12 @@ def """ + func_name + "(double t"
         if isinstance(other, td_Qobj):
             self.cte += other.cte
             self.ops += other.ops
-            self.args = {**self.args, **other.args}
+            self.args.update(**other.args)
             self.const = self.const and other.const
             self.dummy_cte = self.dummy_cte and other.dummy_cte
-            self.valid = self.valid and other.valid
+            self.fast = self.fast and other.fast
+            self.compiled = False
+            self.compiled_code = None
 
             if self.tlist is None:
                 self.tlist = other.tlist
@@ -511,6 +437,20 @@ def """ + func_name + "(double t"
             self.cte *= other
             for op in self.ops:
                 op[0] *= other
+        elif isinstance(other, td_Qobj):
+            if other.const:
+                self.cte *= other.cte
+                for op in self.ops:
+                    op[0] *= other.cte
+            elif self.const:
+                cte = self.cte.copy()
+                self = other.copy()
+                self.cte *= cte
+                for op in self.ops:
+                    op[0] *= cte
+            else:
+                raise Exception("When multiplying td_qobj, one " +
+                                "of them must be constant")
         else:
             raise TypeError("td_qobj can only be multiplied" +
                             " with Qobj or numbers")
@@ -543,6 +483,7 @@ def """ + func_name + "(double t"
             op[0] = -op[0]
         return res
 
+    # Transformations
     def trans(self):
         res = self.copy()
         res.cte = res.cte.trans()
@@ -566,11 +507,11 @@ def """ + func_name + "(double t"
         res._f_conj()
         return res
 
-    # When name fixed, put in stochastic
+    # When name fixed, put in stochastic/ mcsolve
     def norm(self):
         """return a.dag * a """
         if not self.N_obj == 1:
-            raise NotImplementedError("")
+            raise NotImplementedError("Only possible with one composing Qobj")
         res = self.copy()
         res.cte = res.cte.dag() * res.cte
         for op in res.ops:
@@ -578,13 +519,15 @@ def """ + func_name + "(double t"
         res._f_norm2()
         return res
 
+    # Unitary function of Qobj
     def tidyup(self, atol=1e-12):
         self.cte = self.cte.tidyup(atol)
-        for op in res.ops:
+        for op in self.ops:
             op[0] = op[0].tidyup(atol)
-        return res
+        return self
 
     def permute(self, order):
+        res = self.copy()
         res.cte = res.cte.permute(order)
         for op in res.ops:
             op[0] = op[0].permute(order)
@@ -597,7 +540,9 @@ def """ + func_name + "(double t"
             op[0] = op[0].ptrace(sel)
         return res
 
+    # function to apply custom transformations
     def apply(self, function, *args, **kw_args):
+        self.compiled = False
         res = self.copy()
         cte_res = function(res.cte, *args, **kw_args)
         if not isinstance(cte_res, Qobj):
@@ -608,6 +553,7 @@ def """ + func_name + "(double t"
         return res
 
     def apply_decorator(self, function, *args, str_mod=None, inplace_np=False, **kw_args):
+        self.compiled = False
         res = self.copy()
         for op in res.ops:
             if op[3] == 1:
@@ -616,8 +562,7 @@ def """ + func_name + "(double t"
             if op[3] == 2:
                 op[1] = function(op[1], *args, **kw_args)
                 if str_mod is None:
-                    op[2] = None
-                    res.valid = False
+                    res.fast = False
                 else:
                     op[2] = str_mod[0] + op[2] + str_mod[1]
             elif op[3] == 3:
@@ -630,8 +575,7 @@ def """ + func_name + "(double t"
                         op[2][i] = ff(v)
                 else:
                     op[1] = function(op[1], *args, **kw_args)
-                    res.valid = False
-
+                    res.fast = False
         return res
 
     def _f_norm2(self):
@@ -646,7 +590,6 @@ def """ + func_name + "(double t"
                 op[2] = np.abs(op[2])**2
         return self
 
-
     def _f_conj(self):
         for op in self.ops:
             if op[3] == 1:
@@ -658,6 +601,68 @@ def """ + func_name + "(double t"
             elif op[3] == 3:
                 op[2] = np.conj(op[2])
         return self
+
+    def compile(self, code=False):
+        if self.fast:
+            if not code:
+                self.compiled_Qobj, self.compiled_ptr = td_qobj_codegen(self)
+                if self.compiled_Qobj is None:
+                    raise Exception("Could not compile")
+                else:
+                    self.compiled = True
+            else:
+                self.compiled_Qobj, self.compiled_ptr, code_str = \
+                        td_qobj_codegen(self, code)
+                if self.compiled_Qobj is None:
+                    raise Exception("Could not compile")
+                else:
+                    self.compiled = True
+                return code_str
+
+    def get_compiled_call(self):
+        if not self.fast:
+            return self.__call__
+        if not self.compiled:
+            self.compile()
+        return self.compiled_Qobj.call
+
+    def get_rhs_func(self):
+        if not self.fast:
+            return self.rhs
+        if not self.compiled:
+            self.compile()
+        return self.compiled_Qobj.rhs
+
+    def _get_rhs_ptr(self):
+        if not self.fast:
+            raise Exception("Cannot be compiled")
+        if not self.compiled:
+            self.compile()
+        return self.compiled_ptr[0]
+
+    def get_expect_func(self):
+        if not self.fast:
+            return self.expect
+        if not self.compiled:
+            self.compile()
+        return self.compiled_Qobj.expect
+
+    def _get_expect_ptr(self):
+        if not self.fast:
+            raise Exception("Cannot be compiled")
+        if not self.compiled:
+            self.compile()
+        return self.compiled_ptr[1]
+
+    def expect(self, t, vec, herm=0):
+        if self.cte.issuper:
+            return cy_expect_rho_vec(self.__call__(t).data, vec, herm)
+        else:
+            return cy_expect_psi(self.__call__(t).data, vec, herm)
+
+    def rhs(self, t, vec):
+        return spmv(self.__call__(t).data, vec)
+
 
 
 def _interpolate(t, f_array, N, dt):
@@ -694,7 +699,7 @@ def _conj(f):
         return np.conj(f(a, **kwargs))
     return ff
 
-def td_liouvillian(H, c_ops=[], chi=None):
+def td_liouvillian(H, c_ops=[], chi=None, tlist=None):
     """Assembles the Liouvillian superoperator from a Hamiltonian
     and a ``list`` of collapse operators. Accept time dependant
     operator and return a td_qobj
@@ -720,7 +725,7 @@ def td_liouvillian(H, c_ops=[], chi=None):
 
     if H is not None:
         if not isinstance(H, td_Qobj):
-            L = td_Qobj(H)
+            L = td_Qobj(H, tlist=tlist)
         else:
             L = H
         L = L.apply(liouvillian, chi=chi)
@@ -730,7 +735,7 @@ def td_liouvillian(H, c_ops=[], chi=None):
             return liouvillian(None, c_ops=[c_ops], chi=chi)
         for c in c_ops:
             if not isinstance(c, td_Qobj):
-                cL = td_Qobj(c)
+                cL = td_Qobj(c, tlist=tlist)
             else:
                 cL = c
             if not cL.N_obj == 1:
@@ -746,7 +751,7 @@ def td_liouvillian(H, c_ops=[], chi=None):
     return L
 
 
-def td_lindblad_dissipator(a):
+def td_lindblad_dissipator(a, tlist=None):
     """
     Lindblad dissipator (generalized) for a single collapse operator.
     For the
@@ -768,7 +773,7 @@ def td_lindblad_dissipator(a):
         Lindblad dissipator superoperator.
     """
     if not isinstance(a, td_Qobj):
-        b = td_Qobj(a)
+        b = td_Qobj(a, tlist=tlist)
     else:
         b = a
     if not b.N_obj == 1:

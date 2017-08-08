@@ -149,7 +149,13 @@ write_version_py()
 # Add Cython extensions here
 cy_exts = ['spmatfuncs', 'stochastic', 'sparse_utils', 'graph_utils', 'interpolate',
         'spmath', 'heom', 'math', 'spconvert', 'ptrace', 'testing', 'brtools',
+<<<<<<< HEAD
         'brtools_testing', 'dopri5', 'mcsolve', 'fast_stochastic']
+||||||| merged common ancestors
+        'brtools_testing']
+=======
+        'brtools_testing', 'inter']
+>>>>>>> master
 
 # If on Win and Python version >= 3.5 (i.e. Visual studio compile)
 if sys.platform == 'win32' and int(str(sys.version_info[0])+str(sys.version_info[1])) >= 35:
@@ -212,6 +218,15 @@ if "--with-openmp" in sys.argv:
             include_dirs = [np.get_include()],
             extra_compile_args=_compiler_flags,
             extra_link_args=[],
+            language='c++')
+    EXT_MODULES.append(_mod)
+    
+    # Add omp_sparse_utils
+    _mod = Extension('qutip.cy.openmp.omp_sparse_utils',
+            sources = ['qutip/cy/openmp/omp_sparse_utils.pyx'],
+            include_dirs = [np.get_include()],
+            extra_compile_args=_compiler_flags+omp_flags,
+            extra_link_args=omp_args,
             language='c++')
     EXT_MODULES.append(_mod)
 
