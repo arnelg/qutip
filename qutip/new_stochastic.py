@@ -64,6 +64,7 @@ from qutip.cy.spmatfuncs import cy_expect_psi_csr, spmv, cy_expect_rho_vec, \
 from qutip.cy.stochastic import (cy_d1_rho_photocurrent,
                                  cy_d2_rho_photocurrent)
 from qutip.cy.fast_stochastic import cy_smesolve_fast_single_trajectory
+from qutip.cy.fast_ssesolve import cy_ssesolve_single_trajectory
 
 from qutip.parallel import serial_map
 from qutip.ui.progressbar import TextProgressBar
@@ -272,17 +273,6 @@ class StochasticSolverOptions:
 
         self.map_kwargs = map_kwargs if map_kwargs is not None else {}
 
-"""        #Does any operator depend on time?
-        self.td = False
-        if not isinstance(H, Qobj):
-            self.td = True
-        for ops in c_ops:
-            if not isinstance(ops, Qobj):
-                self.td = True
-        for ops in sc_ops:
-            if not isinstance(ops, Qobj):
-                self.td = True"""
-
 def make_d1d2_se(sso):
     if not sso.method in [None, 'homodyne', 'heterodyne', 'photocurrent']:
         raise Exception("The method should be one of "+\
@@ -458,7 +448,7 @@ def make_d1d2_me(sso):
                     sso.m_ops += [td_c.apply(spre)]
 
 def new_ssesolve(H, psi0, times, sc_ops=[], e_ops=[],
-                 _safe_mode=True, **kwargs):
+                 _safe_mode=True, fast=True, **kwargs):
     """
     Solve the stochastic Schrödinger equation. Dispatch to specific solvers
     depending on the value of the `solver` keyword argument.
@@ -557,13 +547,24 @@ def new_ssesolve(H, psi0, times, sc_ops=[], e_ops=[],
                     sso.m_ops += [td_c]
 
     if sso.solver == 'euler-maruyama' or sso.solver is None:
-        sso.rhs = _rhs_euler_maruyama
+        if sso.method == 'homodyne' and fast:
+            sso.rhs = 10
+            a_rhs, a_expect = prepare_A_cy_sse_euler_homodyne(sso.H, sso.sc_ops, sso.dt)
+            sso.A_td_ops = [a_rhs, a_expect]
+
+        else:
+            sso.rhs = _rhs_euler_maruyama
 
     elif sso.method == 'photocurrent':
         raise Exception("Only euler-maruyama supports photocurrent")
 
     elif sso.solver == 'platen':
-        sso.rhs = _rhs_platen
+        if sso.method == 'homodyne' and fast:
+            sso.rhs = 30
+            a_rhs, a_expect = prepare_A_cy_sse_euler_homodyne(sso.H, sso.sc_ops, sso.dt)
+            sso.A_td_ops = [a_rhs, a_expect]
+        else:
+            sso.rhs = _rhs_platen
 
     elif sso.method == 'heterodyne':
         raise Exception("Milstein do not supports heterodyne")
@@ -676,6 +677,7 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
     for ops in sc_ops:
         if not isinstance(ops, Qobj):
             sso.td[1] = True
+
     #Set default d1,d2 if not supplied
     if not sso.custom[1]:
         make_d1d2_me(sso)
@@ -863,6 +865,7 @@ def _sesolve_generic(sso, options, progress_bar):
     data.noise = []
     data.measurement = []
 
+
     if sso.me:
         data.solver = "smesolve"
         # Master equation
@@ -873,7 +876,10 @@ def _sesolve_generic(sso, options, progress_bar):
     else:
         data.solver = "ssesolve"
         # Schrodinger equation
-        task = _ssesolve_single_trajectory
+        if not isinstance(sso.rhs, int):
+            task = _ssesolve_single_trajectory
+        else:
+            task = cy_ssesolve_single_trajectory
 
     map_kwargs = {'progress_bar': progress_bar}
     map_kwargs.update(sso.map_kwargs)
@@ -1375,9 +1381,9 @@ def d2_rho_photocurrent(t, rho_vec, A, args, td):
 #
 def prep_sc_ops_homodyne_psi(H, c_ops, sc_ops, dt, td):
     if not td[0]:
-        H = -1.0j*H.data * dt
+        HH = -1.0j*H.data * dt
     else:
-        H = td_Qobj(H)*-1.0j * dt
+        HH = td_Qobj(H)*-1.0j * dt
 
     A = []
     if not td[1]:
@@ -1391,7 +1397,7 @@ def prep_sc_ops_homodyne_psi(H, c_ops, sc_ops, dt, td):
         for sc in sc_t:
             n = sc.apply(_cdc)._f_norm2()
             A += [[sc, (sc + sc.dag()), n]]
-    return H,A
+    return HH, A
 
 def prep_sc_ops_heterodyne_psi(H, c_ops, sc_ops, dt, td):
     if not td[0]:
@@ -1584,9 +1590,9 @@ def _rhs_platen(H, vec_t, t, dt, sc_ops, dW, d1, d2, args, td):
     """
     Platen rhs function for both master eq and schrodinger eq.
 
-    dV = -iH* (V+Vt)/2 * dt + (d1(V)+d1(Vt))*2 * dt
+    dV = -iH* (V+Vt)/2 * dt + (d1(V)+d1(Vt))/2 * dt
          + (2*d2_i(V)+d2_i(V+)+d2_i(V-))/4 * dW_i
-         + (d2_i(V+)+d2_i(V-)) * (dW_i**2 -dt) * dt**(-.5)
+         + (d2_i(V+)-d2_i(V-))/4 * (dW_i**2 -dt) * dt**(-.5)
 
     Vt = V -iH*V*dt + d1*dt + d2_i*dW_i
     V+/- = V -iH*V*dt + d1*dt +/- d2_i*dt**.5
@@ -1612,8 +1618,8 @@ def _rhs_platen(H, vec_t, t, dt, sc_ops, dW, d1, d2, args, td):
     d2_vp = d2(t+dt, Vp, sc_ops, args, td[1])
     d2_vm = d2(t+dt, Vm, sc_ops, args, td[1])
     dvec_t += np.dot(dW, 0.25*(2 * d2_vec + d2_vp + d2_vm))
-    dW2 = (dW**2 - dt) / sqrt_dt
-    dvec_t += np.dot(dW, 0.25*(d2_vp - d2_vm))
+    dW2 = 0.25 * (dW**2 - dt) / sqrt_dt
+    dvec_t += np.dot(dW2, (d2_vp - d2_vm))
 
     return vec_t + dvec_t
 
@@ -1707,3 +1713,43 @@ def _generate_A_ops_implicit(H, c_ops, sc_ops, dt):
     out1 += [[] for n in range(A_len - 1)]
 
     return L, out1
+
+
+def prepare_A_cy_sse_euler_homodyne(H, sc_ops, dt):
+    def _stack(obj,i,N):
+        data = obj.data
+        stack = [data*0]*N
+        stack[i] = data
+        return Qobj(sp.vstack(stack).tocsr())
+
+    N = len(sc_ops)
+    td_H =  (td_Qobj(H)*(-1j*dt)).apply(_stack, 2*N, 2*N+1)
+    expect_list = []
+    td_sc_list = []
+
+    for i, sc in enumerate(sc_ops):
+        td_sc = td_Qobj(sc)
+        td_H += td_sc.apply(_stack, 2*i, 2*N+1)
+        td_H += td_sc.norm().apply(_stack, 2*i+1, 2*N+1)
+        td_sc = td_sc + td_sc.dag()
+        #expect_list.append(td_sc.get_expect_func())
+        td_sc_list.append(td_sc.copy())
+        td_sc_list[-1].compile()
+
+    td_H.compile(code=True)
+
+    return [td_H, td_sc_list]
+
+
+
+
+
+
+
+
+
+
+
+
+
+#
