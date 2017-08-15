@@ -279,7 +279,8 @@ def make_d1d2_se(sso):
                             "[None, 'homodyne', 'heterodyne', 'photocurrent']")
     if sso.method == 'homodyne' or sso.method is None:
         sso.LH, sso.A_ops = prep_sc_ops_homodyne_psi(sso.H,
-                                    sso.c_ops, sso.sc_ops, sso.dt, sso.td)
+                                    sso.c_ops, sso.sc_ops, sso.dt,
+                                    sso.td, sso.args, sso.times)
         sso.d1 = d1_psi_homodyne
         sso.d2 = d2_psi_homodyne
         sso.d2_len = len(sso.sc_ops)
@@ -294,12 +295,13 @@ def make_d1d2_se(sso):
                     sso.m_ops += [(c + c.dag())]
             else:
                 for c in sso.sc_ops:
-                    td_c = td_Qobj(c)
+                    td_c = td_Qobj(c, args=sso.args, tlist=sso.times)
                     sso.m_ops += [(td_c + td_c.dag())]
 
     elif sso.method == 'heterodyne':
         sso.LH, sso.A_ops = prep_sc_ops_heterodyne_psi(sso.H, sso.c_ops,
-                                    sso.sc_ops, sso.dt, sso.td)
+                                    sso.sc_ops, sso.dt,
+                                    sso.td, sso.args, sso.times)
         sso.d1 = d1_psi_heterodyne
         sso.d2 = d2_psi_heterodyne
         sso.d2_len = 2*len(sso.sc_ops)
@@ -329,7 +331,7 @@ def make_d1d2_se(sso):
                     sso.m_ops += [(c + c.dag()), -1j * (c - c.dag()) ]
             else:
                 for c in sso.sc_ops:
-                    td_c = td_Qobj(c)
+                    td_c = td_Qobj(c, args=sso.args, tlist=sso.times)
                     sso.m_ops += [(td_c + td_c.dag()),
                                   -1j * (td_c - td_c.dag()) ]
 
@@ -337,7 +339,8 @@ def make_d1d2_se(sso):
 
     elif sso.method == 'photocurrent':
         sso.LH, sso.A_ops =  prep_sc_ops_photocurrent_psi(sso.H,
-                                    sso.c_ops, sso.sc_ops, sso.dt, sso.td)
+                                    sso.c_ops, sso.sc_ops, sso.dt,
+                                    sso.td, sso.args, sso.times)
         if any(sso.td):
             sso.d1 = d1_psi_photocurrent
             sso.d2 = d2_psi_photocurrent
@@ -355,7 +358,7 @@ def make_d1d2_se(sso):
                     sso.m_ops += [c]
             else:
                 for c in sso.sc_ops:
-                    td_c = td_Qobj(c)
+                    td_c = td_Qobj(c, args=sso.args, tlist=sso.times)
                     sso.m_ops += [td_c]
 
 def make_d1d2_me(sso):
@@ -364,7 +367,8 @@ def make_d1d2_me(sso):
                             "[None, 'homodyne', 'heterodyne', 'photocurrent']")
     if sso.method == 'homodyne' or sso.method is None:
         sso.LH, sso.A_ops = prep_sc_ops_homodyne_rho(sso.H,
-                                    sso.c_ops, sso.sc_ops, sso.dt, sso.td)
+                                    sso.c_ops, sso.sc_ops, sso.dt,
+                                    sso.td, sso.args, sso.times)
         sso.d1 = d1_rho
         sso.d2 = d2_rho
         sso.d2_len = len(sso.sc_ops)
@@ -379,12 +383,13 @@ def make_d1d2_me(sso):
                     sso.m_ops += [spre(c + c.dag())]
             else:
                 for c in sso.sc_ops:
-                    td_c = td_Qobj(c)
+                    td_c = td_Qobj(c, args=sso.args, tlist=sso.times)
                     sso.m_ops += [(td_c + td_c.dag()).apply(spre)]
 
     elif sso.method == 'heterodyne':
         sso.LH, sso.A_ops = prep_sc_ops_heterodyne_rho(sso.H,
-                                    sso.c_ops, sso.sc_ops, sso.dt, sso.td)
+                                    sso.c_ops, sso.sc_ops, sso.dt,
+                                    sso.td, sso.args, sso.times)
         sso.d1 = d1_rho
         sso.d2 = d2_rho
         sso.d2_len = 2*len(sso.sc_ops)
@@ -415,7 +420,7 @@ def make_d1d2_me(sso):
                     sso.m_ops += [spre(c + c.dag()), -1j * spre(c - c.dag()) ]
             else:
                 for c in sso.sc_ops:
-                    td_c = td_Qobj(c)
+                    td_c = td_Qobj(c, args=sso.args, tlist=sso.times)
                     sso.m_ops += [(td_c + td_c.dag()).apply(spre),
                                   -1j * (td_c - td_c.dag()).apply(spre) ]
 
@@ -423,7 +428,8 @@ def make_d1d2_me(sso):
 
     elif sso.method == 'photocurrent':
         sso.LH, sso.A_ops =  prep_sc_ops_photocurrent_rho(sso.H,
-                                    sso.c_ops, sso.sc_ops, sso.dt, sso.td)
+                                    sso.c_ops, sso.sc_ops, sso.dt,
+                                    sso.td, sso.args, sso.times)
         if any(sso.td):
             sso.d1 = d1_rho_photocurrent
             sso.d2 = d2_rho_photocurrent
@@ -444,11 +450,11 @@ def make_d1d2_me(sso):
                     sso.m_ops += [c]
             else:
                 for c in sso.sc_ops:
-                    td_c = td_Qobj(c)
+                    td_c = td_Qobj(c, args=sso.args, tlist=sso.times)
                     sso.m_ops += [td_c.apply(spre)]
 
 def new_ssesolve(H, psi0, times, sc_ops=[], e_ops=[],
-                 _safe_mode=True, fast=True, **kwargs):
+                 _safe_mode=True, fast=True, args={}, **kwargs):
     """
     Solve the stochastic Schrödinger equation. Dispatch to specific solvers
     depending on the value of the `solver` keyword argument.
@@ -502,6 +508,7 @@ def new_ssesolve(H, psi0, times, sc_ops=[], e_ops=[],
 
     sso.me = False
     sso.dt = (times[1] - times[0]) / sso.nsubsteps
+    sso.args = args
 
     #Is any of the rhs, (d1,d2), noise supplied?
     sso.custom = [False, False, False, False]
@@ -549,7 +556,7 @@ def new_ssesolve(H, psi0, times, sc_ops=[], e_ops=[],
     if sso.solver == 'euler-maruyama' or sso.solver is None:
         if sso.method == 'homodyne' and fast:
             sso.rhs = 10
-            a_rhs, a_expect = prepare_A_cy_sse_euler_homodyne(sso.H, sso.sc_ops, sso.dt)
+            a_rhs, a_expect = prepare_A_cy_sse_euler_homodyne(sso.H, sso.sc_ops, sso.dt, args, times)
             sso.A_td_ops = [a_rhs, a_expect]
 
         else:
@@ -561,7 +568,7 @@ def new_ssesolve(H, psi0, times, sc_ops=[], e_ops=[],
     elif sso.solver == 'platen':
         if sso.method == 'homodyne' and fast:
             sso.rhs = 30
-            a_rhs, a_expect = prepare_A_cy_sse_euler_homodyne(sso.H, sso.sc_ops, sso.dt)
+            a_rhs, a_expect = prepare_A_cy_sse_euler_homodyne(sso.H, sso.sc_ops, sso.dt, args, times)
             sso.A_td_ops = [a_rhs, a_expect]
         else:
             sso.rhs = _rhs_platen
@@ -584,7 +591,7 @@ def new_ssesolve(H, psi0, times, sc_ops=[], e_ops=[],
     return res
 
 def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
-                 _safe_mode=True, debug=False, **kwargs):
+                 _safe_mode=True, debug=False, args={}, **kwargs):
     """
     Solve stochastic master equation. Dispatch to specific solvers
     depending on the value of the `solver` keyword argument.
@@ -650,6 +657,7 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
                                   sc_ops=sc_ops, e_ops=e_ops, **kwargs)
 
     sso.me = True
+    sso.args = args
     sso.dt = (times[1] - times[0]) / sso.nsubsteps
 
     #Is any of the rhs, (d1,d2), noise supplied?
@@ -1196,7 +1204,7 @@ def _rhs_deterministic(H, vec_t, t, dt, args, td):
 #
 #   d1 and d2 functions for common schemes (Master Eq)
 #
-def prep_sc_ops_homodyne_rho(H, c_ops, sc_ops, dt, td):
+def prep_sc_ops_homodyne_rho(H, c_ops, sc_ops, dt, td, args, times):
     if not any(td):
         # No time-dependance
         L = liouvillian(H, c_ops=c_ops).data * dt
@@ -1207,7 +1215,7 @@ def prep_sc_ops_homodyne_rho(H, c_ops, sc_ops, dt, td):
 
     elif not td[1]:
         # sc_ops do not depend on time
-        L = td_liouvillian(H, c_ops=c_ops) * dt
+        L = td_liouvillian(H, c_ops=c_ops, args=args, tlist=times) * dt
         A = []
         for sc in sc_ops:
             L += lindblad_dissipator(sc) * dt
@@ -1215,15 +1223,15 @@ def prep_sc_ops_homodyne_rho(H, c_ops, sc_ops, dt, td):
 
     else:
         td[0] = True
-        L = td_liouvillian(H, c_ops=c_ops) * dt
+        L = td_liouvillian(H, c_ops=c_ops, args=args, tlist=times) * dt
         A = []
         for sc in sc_ops:
-            L += td_lindblad_dissipator(sc) * dt
-            td_sc = td_Qobj(sc)
+            L += td_lindblad_dissipator(sc, args=args, tlist=times) * dt
+            td_sc = td_Qobj(sc, args=args, tlist=times)
             A += [[td_sc.apply(spre) + td_sc.dag().apply(spost)]]
     return L, A
 
-def prep_sc_ops_heterodyne_rho(H, c_ops, sc_ops, dt, td):
+def prep_sc_ops_heterodyne_rho(H, c_ops, sc_ops, dt, td, args, times):
     if not any(td):
         # No time-dependance
         L = liouvillian(H, c_ops=c_ops).data * dt
@@ -1235,7 +1243,7 @@ def prep_sc_ops_heterodyne_rho(H, c_ops, sc_ops, dt, td):
 
     elif not td[1]:
         # sc_ops do not depend on time
-        L = td_liouvillian(H, c_ops=c_ops) * dt
+        L = td_liouvillian(H, c_ops=c_ops, args=args, tlist=times) * dt
         A = []
         for sc in sc_ops:
             L += lindblad_dissipator(sc) * dt
@@ -1247,15 +1255,15 @@ def prep_sc_ops_heterodyne_rho(H, c_ops, sc_ops, dt, td):
         L = td_liouvillian(H, c_ops=c_ops) * dt
         A = []
         for sc in sc_ops:
-            L += td_lindblad_dissipator(sc) * dt
-            td_sc = td_Qobj(sc)
+            L += td_lindblad_dissipator(sc, args=args, tlist=times) * dt
+            td_sc = td_Qobj(sc, args=args, tlist=times)
             A += [[ 1.0  / np.sqrt(2) * (td_sc.apply(spre) +
                                          td_sc.dag().apply(spost))]]
             A += [[-1.0j / np.sqrt(2) * (td_sc.apply(spre) -
                                          td_sc.dag().apply(spost))]]
     return L, A
 
-def prep_sc_ops_photocurrent_rho(H, c_ops, sc_ops, dt, td):
+def prep_sc_ops_photocurrent_rho(H, c_ops, sc_ops, dt, td, args, times):
     if not any(td):
         # No time-dependance
         L = liouvillian(H, c_ops=c_ops).data * dt
@@ -1269,7 +1277,7 @@ def prep_sc_ops_photocurrent_rho(H, c_ops, sc_ops, dt, td):
 
     elif not td[1]:
         # sc_ops do not depend on time
-        L = td_liouvillian(H, c_ops=c_ops) * dt
+        L = td_liouvillian(H, c_ops=c_ops, args=args, tlist=times) * dt
         A = []
         for sc in sc_ops:
             L += lindblad_dissipator(sc) * dt
@@ -1285,11 +1293,11 @@ def prep_sc_ops_photocurrent_rho(H, c_ops, sc_ops, dt, td):
             return spre(c) * spost(c.dag())
 
         td[0] = True
-        L = td_liouvillian(H, c_ops=c_ops) * dt
+        L = td_liouvillian(H, c_ops=c_ops, args=args, tlist=times) * dt
         A = []
         for sc in sc_ops:
-            L += td_lindblad_dissipator(sc) * dt
-            td_sc = td_Qobj(sc)
+            L += td_lindblad_dissipator(sc, args=args, tlist=times) * dt
+            td_sc = td_Qobj(sc, args=args, tlist=times)
             n = td_sc.apply(_cdc)._f_norm2()
             A += [[n.apply(spre) + n.apply(spost),
                    td_sc.apply(_cdc2)._f_norm2(),
@@ -1379,11 +1387,11 @@ def d2_rho_photocurrent(t, rho_vec, A, args, td):
 #
 #   d1 and d2 functions for common schemes (Schrodinger)
 #
-def prep_sc_ops_homodyne_psi(H, c_ops, sc_ops, dt, td):
+def prep_sc_ops_homodyne_psi(H, c_ops, sc_ops, dt, td, args, times):
     if not td[0]:
         HH = -1.0j*H.data * dt
     else:
-        HH = td_Qobj(H)*-1.0j * dt
+        HH = td_Qobj(H, args=args, tlist=times)*-1.0j * dt
 
     A = []
     if not td[1]:
@@ -1393,17 +1401,17 @@ def prep_sc_ops_homodyne_psi(H, c_ops, sc_ops, dt, td):
         def _cdc(c):
             return c.dag()*c
 
-        sc_t = [td_Qobj(sc) for sc in sc_ops]
+        sc_t = [td_Qobj(sc, args=args, tlist=times) for sc in sc_ops]
         for sc in sc_t:
             n = sc.apply(_cdc)._f_norm2()
             A += [[sc, (sc + sc.dag()), n]]
     return HH, A
 
-def prep_sc_ops_heterodyne_psi(H, c_ops, sc_ops, dt, td):
+def prep_sc_ops_heterodyne_psi(H, c_ops, sc_ops, dt, td, args, times):
     if not td[0]:
         H = -1.0j*H.data * dt
     else:
-        H = td_Qobj(H)*-1.0j * dt
+        H = td_Qobj(H, args=args, tlist=times)*-1.0j * dt
 
     A = []
     if not td[1]:
@@ -1414,7 +1422,7 @@ def prep_sc_ops_heterodyne_psi(H, c_ops, sc_ops, dt, td):
         def _cdc(c):
             return c.dag()*c
 
-        sc_t = [td_Qobj(sc) for sc in sc_ops]
+        sc_t = [td_Qobj(sc, args=args, tlist=times) for sc in sc_ops]
         for sc in sc_t:
             cd = sc.dag()
             n = sc.apply(_cdc)._f_norm2()
@@ -1422,11 +1430,11 @@ def prep_sc_ops_heterodyne_psi(H, c_ops, sc_ops, dt, td):
                      sc - cd, n])
     return H,A
 
-def prep_sc_ops_photocurrent_psi(H, c_ops, sc_ops, dt, td):
+def prep_sc_ops_photocurrent_psi(H, c_ops, sc_ops, dt, td, args, times):
     if not td[0]:
         H = H.data * -1.0j * dt
     else:
-        H = td_Qobj(H)*-1.0j * dt
+        H = td_Qobj(H, args=args, tlist=times)*-1.0j * dt
 
     A = []
     if not td[1]:
@@ -1435,7 +1443,7 @@ def prep_sc_ops_photocurrent_psi(H, c_ops, sc_ops, dt, td):
     else:
         def _cdc(c):
             return c.dag()*c
-        sc_t = [td_Qobj(sc) for sc in sc_ops]
+        sc_t = [td_Qobj(sc, args=args, tlist=times) for sc in sc_ops]
         for sc in sc_t:
             n = sc.apply(_cdc)._f_norm2()
             A += [[sc, n]]
@@ -1715,7 +1723,7 @@ def _generate_A_ops_implicit(H, c_ops, sc_ops, dt):
     return L, out1
 
 
-def prepare_A_cy_sse_euler_homodyne(H, sc_ops, dt):
+def prepare_A_cy_sse_euler_homodyne(H, sc_ops, dt, args, tlist):
     def _stack(obj,i,N):
         data = obj.data
         stack = [data*0]*N
@@ -1723,12 +1731,12 @@ def prepare_A_cy_sse_euler_homodyne(H, sc_ops, dt):
         return Qobj(sp.vstack(stack).tocsr())
 
     N = len(sc_ops)
-    td_H =  (td_Qobj(H)*(-1j*dt)).apply(_stack, 2*N, 2*N+1)
+    td_H =  (td_Qobj(H, args=args, tlist=tlist)*(-1j*dt)).apply(_stack, 2*N, 2*N+1)
     expect_list = []
     td_sc_list = []
 
     for i, sc in enumerate(sc_ops):
-        td_sc = td_Qobj(sc)
+        td_sc = td_Qobj(sc, args=args, tlist=tlist)
         td_H += td_sc.apply(_stack, 2*i, 2*N+1)
         td_H += td_sc.norm().apply(_stack, 2*i+1, 2*N+1)
         td_sc = td_sc + td_sc.dag()
@@ -1736,7 +1744,7 @@ def prepare_A_cy_sse_euler_homodyne(H, sc_ops, dt):
         td_sc_list.append(td_sc.copy())
         td_sc_list[-1].compile()
 
-    td_H.compile(code=True)
+    td_H.compile()
 
     return [td_H, td_sc_list]
 
