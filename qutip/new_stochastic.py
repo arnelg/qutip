@@ -53,24 +53,26 @@ except:
 
 from numpy.random import RandomState
 
-from qutip.qobj import Qobj, isket
+from qutip.qobj import Qobj, isket, isoper, issuper
 from qutip.states import ket2dm
 from qutip.solver import Result
 from qutip.expect import expect, expect_rho_vec
 from qutip.superoperator import (spre, spost, mat2vec, vec2mat,
                                  liouvillian, lindblad_dissipator)
 from qutip.cy.spmatfuncs import cy_expect_psi_csr, spmv, cy_expect_rho_vec, \
-                                cy_expect_psi
+                                cy_expect_psi, spmvpy_csr
 from qutip.cy.stochastic import (cy_d1_rho_photocurrent,
                                  cy_d2_rho_photocurrent)
-from qutip.cy.fast_stochastic import cy_smesolve_fast_single_trajectory
-from qutip.cy.fast_ssesolve import cy_ssesolve_single_trajectory
+#from qutip.cy.fast_stochastic import cy_smesolve_fast_single_trajectory
+#from qutip.cy.fast_ssesolve import cy_ssesolve_single_trajectory
 
 from qutip.parallel import serial_map
 from qutip.ui.progressbar import TextProgressBar
 from qutip.solver import Options, _solver_safety_check
 from qutip.settings import debug
-from qutip.td_qobj import td_liouvillian, td_Qobj, td_lindblad_dissipator
+from td_qobj import td_liouvillian, td_Qobj, td_lindblad_dissipator
+from scipy.sparse.linalg import LinearOperator
+from scipy.linalg.blas import zaxpy
 
 
 if debug:
@@ -366,7 +368,11 @@ def make_d1d2_me(sso):
         raise Exception("The method should be one of "+\
                             "[None, 'homodyne', 'heterodyne', 'photocurrent']")
     if sso.method == 'homodyne' or sso.method is None:
-        sso.LH, sso.A_ops = prep_sc_ops_homodyne_rho(sso.H,
+        if sso.solver == 'taylor15' or sso.solver == 'taylor15-imp':
+            sso.LH = _L_td_taylor(sso.H, sso.c_ops, sso.sc_ops, sso.td)
+            sso.A_ops = _generate_A_ops_taylor(sso.sc_ops, sso.LH, sso.dt)
+        else:
+            sso.LH, sso.A_ops = prep_sc_ops_homodyne_rho(sso.H,
                                     sso.c_ops, sso.sc_ops, sso.dt,
                                     sso.td, sso.args, sso.times)
         sso.d1 = d1_rho
@@ -771,12 +777,37 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
             else :
                 sso.rhs = _rhs_milstein
                 sso.d2 = d2_rho_milstein
+               
+        elif sso.solver == 'taylor15':
+            sso.generate_noise = _generate_noise_Taylor_15
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = _rhs_rho_taylor_15_one
+                else:
+                    raise Exception("'taylor15' : Only one stochastic " +
+                                    "operator is supported")
+            else:
+                raise Exception("'taylor15' : Only homodyne is available")
+                
+        elif sso.solver == 'taylor15-imp':
+            sso.generate_noise = _generate_noise_Taylor_15
+            if not 'tol' in sso.args:
+                sso.args['tol'] = 1e-6
+            if sso.method == 'homodyne' or sso.method is None:
+                if len(sc_ops) == 1:
+                    sso.rhs = _rhs_rho_taylor_15_implicit
+                else:
+                    raise Exception("Only one stochastic operator is supported")
+            else:
+                raise Exception("Only homodyne is available")
 
         elif sso.td:
-            raise Exception("Only 'euler-maruyama', 'milstein' and 'platen' " +
+            raise Exception("Only 'euler-maruyama', 'milstein', 'platen' " +
+                            " 'taylor15' and 'taylor15-imp' " +
                             "support time dependant cases")
         elif sso.custom[2]: # Custom noise function
             raise Exception("Only 'euler-maruyama', 'milstein' and 'platen' " +
+                            " 'taylor15' and 'taylor15-imp' " +
                             "support custom noise function")
         elif not sso.method == 'homodyne': # Not yet done
             raise Exception("Only 'euler-maruyama', 'milstein' and 'platen' " +
@@ -795,32 +826,6 @@ def new_smesolve(H, rho0, times, c_ops=[], sc_ops=[], e_ops=[],
                                     "operator is supported")
             else:
                 raise Exception("'milstein-imp' : Only homodyne is available")
-
-        elif sso.solver == 'taylor15':
-            sso.generate_A_ops = _generate_A_ops_simple
-            sso.generate_noise = 30
-            if sso.method == 'homodyne':
-                if len(sc_ops) == 1:
-                    sso.rhs = 30
-                else:
-                    raise Exception("'taylor15' : Only one stochastic " +
-                                    "operator is supported")
-            else:
-                raise Exception("'taylor15' : Only homodyne is available")
-
-        elif sso.solver == 'taylor15-imp':
-            sso.generate_A_ops = _generate_A_ops_implicit
-            sso.generate_noise = 30
-            if sso.args == None or 'tol' in sso.args:
-                sso.args = {'tol':1e-6}
-            if sso.method == 'homodyne':
-                if len(sc_ops) == 1:
-                    sso.rhs = 35
-                else:
-                    raise Exception("'taylor15-imp' : Only one stochastic " +
-                                    "operator is supported")
-            else:
-                raise Exception("'taylor15-imp' : Only homodyne is available")
 
         elif sso.solver == 'pc-euler':
             sso.generate_A_ops = _generate_A_ops_Milstein
@@ -1200,6 +1205,104 @@ def _rhs_deterministic(H, vec_t, t, dt, args, td):
     else:
         return spmv(H, vec_t)
 
+def _rhs_rho_deterministic(L, rho_t, t, dt, args, td):
+    """
+    Deterministic contribution to the density matrix change
+    """
+    if td:
+        out = np.zeros(rho_t.shape[0],dtype=complex) 
+        L_list = L[0][0]
+        L_td = L[0][1]
+        spmvpy_csr(L_list.data, L_list.indices, L_list.indptr, rho_t, L_td(t, args), out) 
+        for n in range(1, len(L)):
+            L_list = L[n][0]
+            L_td = L[n][1]
+            if L[n][2]: #Do we need to square the time-dependent coefficient? 
+                spmvpy_csr(L_list.data, L_list.indices, L_list.indptr, rho_t, L_td(t, args)**2, out) #for c_ops
+            else:
+                spmvpy_csr(L_list.data, L_list.indices, L_list.indptr, rho_t, L_td(t, args), out) #for H
+    else:
+        out = spmv(L,rho_t)
+    return out
+
+def _rhs_rho_deterministic_deriv(L, rho_t, t, dt, args, td):
+    """
+    Time derivative for Taylor 1.5 method
+    """
+    out = np.zeros(rho_t.shape[0],dtype=complex) 
+    if td:
+        constant_func = lambda x, y: 1.0
+        for n in range (len(L)):
+            if L[n][1] != constant_func: #Do we have a time-dependence?
+                L_list = L[n][0]
+                dL = L[n][1](t + dt,args) - L[n][1](t,args)
+                if L[n][2]: #for с_ops                
+                    dL *= 2 * L[n][1](t,args)
+                    spmvpy_csr(L_list.data, L_list.indices, L_list.indptr, rho_t, dL, out)
+                else: #for H
+                    spmvpy_csr(L_list.data, L_list.indices, L_list.indptr, rho_t, dL, out)
+
+    return out
+
+def _L_td_taylor(H, c_ops, sc_ops, td):
+    """
+    Time dependent liouvillian for Taylor-1.5 implicit and explicit solver
+    """
+    if not any(td):
+        L_list = liouvillian(H, c_ops=c_ops).data
+        L_list += np.sum([lindblad_dissipator(sc, data_only=True) for sc in sc_ops], axis=0) 
+    else:
+    #L[n][0] - operator
+    #L[n][1] - it's dependence on time
+    #L[n][2] - do we need to square the time-dependent coefficient?
+        L_list = []
+        constant_func = lambda x, y: 1.0
+        for h_spec in H:
+            if isinstance(h_spec, Qobj):
+                h = h_spec
+                h_coeff = constant_func
+            elif isinstance(h_spec, list) and isinstance(h_spec[0], Qobj):
+                h = h_spec[0]
+                h_coeff = h_spec[1]
+            else:
+                raise TypeError("Incorrect specification of time-dependent " +
+                            "Hamiltonian (expected callback function)")
+            if isoper(h):
+                L_list.append([(-1j * (spre(h) - spost(h))).data, h_coeff, False])
+            else:
+                raise TypeError("Incorrect specification of time-dependent " +
+                            "Hamiltonian (expected operator)")
+            
+        for c_spec in c_ops:
+            if isinstance(c_spec, Qobj):
+                c = c_spec
+                c_coeff = constant_func
+                c_square = False
+            elif isinstance(c_spec, list) and isinstance(c_spec[0], Qobj):
+                c = c_spec[0]
+                c_coeff = c_spec[1]
+                c_square = True
+            else:
+                raise TypeError("Incorrect specification of time-dependent " +
+                            "collapse operators (expected callback function)")
+            if isoper(c):
+                L_list.append([liouvillian(None, [c], data_only=True), c_coeff, c_square])
+            else:
+                raise TypeError("Incorrect specification of time-dependent " +
+                            "collapse operators (expected operator)")
+            
+        for sc_spec in sc_ops:
+            if isinstance(sc_spec, Qobj):
+                sc = sc_spec
+                sc_coeff = constant_func
+            else:
+                raise TypeError("Incorrect specification of stohastic operator")
+            if isoper(sc):
+                L_list.append([lindblad_dissipator(sc, data_only=True), sc_coeff, False])
+            else:
+                raise TypeError("Incorrect specification of stohastic operator")
+  
+    return(L_list)
 
 #
 #   d1 and d2 functions for common schemes (Master Eq)
@@ -1631,30 +1734,154 @@ def _rhs_platen(H, vec_t, t, dt, sc_ops, dW, d1, d2, args, td):
 
     return vec_t + dvec_t
 
+def _rhs_rho_taylor_15_one(L, rho_t, t, dt, A, ddW, d1, d2, args, td):
+    """
+    strong order 1.5 Taylor scheme for homodyne detection with 1 stochastic operator
+    """
+    n = rho_t.shape[0]
+    Liv = np.zeros((7,rho_t.shape[0]), dtype = complex)
+    Noise = np.zeros(7)
+    
+    Noise[0] = dt
+    Noise[1] = ddW[0]
+    Noise[2] = 0.5 * (ddW[0] * ddW[0] - dt)
+    Noise[3] = ddW[1]
+    Noise[4] = ddW[0] * dt - ddW[1]
+    Noise[5] = 0.5 * dt
+    Noise[6] = 0.5 * (0.3333333333333333 * ddW[0] * ddW[0] - dt) * ddW[0]
+    
+    A = A[0] #А[0] - spre(sc_ops) + spost(sc_ops)
+    
+    # drho = a (rho, t) * dt + b (rho, t) * dW
+    # rho_(n+1) = rho_n + adt + bdW + 0.5bb'((dW)^2 - dt) +  - Milstein terms 
+    # + ba'dZ + ab'(dWdt - dZ) + 0.5[(da/dt) + aa']dt^2 + 0.5bb'bb'(1/3(dW)^2 - dt)dW
+    
+    # Milstein terms:
+    Liv[0] = _rhs_rho_deterministic(L, rho_t, t, dt, args, td[0]) #a
+    e0 = cy_expect_rho_vec(A[0], rho_t, 1)
+    #b = A[0] * rho_t - e0 * rho_t:
+    Liv[1] = A[0] * rho_t 
+    Liv[1] = zaxpy(rho_t, Liv[1], n, -e0)
+    TrAb = cy_expect_rho_vec(A[0], Liv[1], 1) 
+    #A[0] * Liv[1] - TrAb * rho_t - e0 * Liv[1]:
+    Liv[2] = A[0] * Liv[1] 
+    Liv[2] = zaxpy(rho_t, Liv[2], n, -TrAb)
+    Liv[2] = zaxpy(Liv[1], Liv[2], n, -e0)
+    TrALb = cy_expect_rho_vec(A[0], Liv[2], 1)
+    TrAa = cy_expect_rho_vec(A[0], Liv[0], 1)
+    
+    #New terms:
+    Liv[3] = _rhs_rho_deterministic(L, Liv[1], t, dt, args, td[0]) 
+    #A[0] * Liv[0] - TrAa * rho_t - e0 * Liv[0] - TrAb * Liv[1]:
+    Liv[4] = A[0] * Liv[0] 
+    Liv[4] = zaxpy(rho_t, Liv[4], n, -TrAa)
+    Liv[4] = zaxpy(Liv[0], Liv[4], n, -e0)
+    Liv[4] = zaxpy(Liv[1], Liv[4], n, -TrAb)
+    #0.5[(da/dt) + aa']dt^2: 
+    Liv[5] = _rhs_rho_deterministic_deriv(L, rho_t, t, dt, args, td[0])
+    Liv[5] = zaxpy(_rhs_rho_deterministic(L, Liv[0], t, dt, args, td[0]), Liv[5], n, dt)
+    #A[0] * Liv[2] - TrALb * rho_t - (2 * TrAb) * Liv[1] - e0 * Liv[2]:
+    Liv[6] = A[0] * Liv[2] 
+    Liv[6] = zaxpy(rho_t, Liv[6], n, -TrALb)
+    Liv[6] = zaxpy(Liv[1], Liv[6], n, -2.0 * TrAb)
+    Liv[6] = zaxpy(Liv[2], Liv[6], n, -e0)
+    
+    drho_t = np.dot(Noise,Liv)
+    
+    return rho_t + drho_t
 
-#
-#   Preparation of operator for the fast version
-#
-def _generate_A_ops_simple(H, c_ops, sc_ops, dt):
+def _rhs_rho_taylor_15_implicit(L, rho_t, t, dt, A, ddW, d1, d2, args, td):
+    """
+    strong order 1.5 Taylor implisit scheme for homodyne detection with 1 stochastic operator
+    """
+    #Drift implicit Taylor 1.5 (alpha = 1/2, beta = doesn't matter)
+    n = rho_t.shape[0]
+    Noise = np.zeros(6)
+    
+    Noise[0] = 0.5 * dt
+    Noise[1] = ddW[0]
+    Noise[2] = 0.5 * (ddW[0] * ddW[0] - dt)
+    Noise[3] = ddW[1] - 0.5 * ddW[0] * dt
+    Noise[4] = ddW[0] * dt - ddW[1]
+    Noise[5] = 0.5 * (0.3333333333333333 * ddW[0] * ddW[0] - dt) * ddW[0]
+    
+    A = A[0]
+    
+    # drho = a (rho, t) * dt + b (rho, t) * dW
+    # (I - 0.5 * L(t+dt) * dt) * rho_(n+1) = rho_n + adt + bdW + 0.5bb'((dW)^2 - dt) +  - Milstein terms 
+    # + ba'dZ + ab'(dWdt - dZ) + 0.5bb'bb'(1/3(dW)^2 - dt)dW
+    
+    #left-hand sight of the equation
+    def Lhs(v): 
+        return (v - (0.5 * dt) * _rhs_rho_deterministic(L, v, t + dt, dt, args, td[0]))
+     
+    if td[0]:
+        B = LinearOperator((L[0][0].shape), matvec = Lhs, dtype = complex)
+    else:
+        B = LinearOperator((L.shape), matvec = Lhs, dtype = complex)
+    
+    a = _rhs_rho_deterministic(L, rho_t, t, dt, args, td[0])
+    e0 = cy_expect_rho_vec(A[0], rho_t, 1)
+    #b = A[0] * rho_t - e0 * rho_t:
+    b = A[0] * rho_t 
+    b = zaxpy(rho_t, b, n, -e0)
+    TrAb = cy_expect_rho_vec(A[0], b, 1)
+    #Lb = A[0] * b - TrAb * rho_t - e0 * b:
+    Lb = A[0] * b
+    Lb = zaxpy(rho_t, Lb, n, -TrAb) 
+    Lb = zaxpy(b, Lb, n, -e0) 
+    TrALb = cy_expect_rho_vec(A[0], Lb, 1)
+    TrAa = cy_expect_rho_vec(A[0], a, 1)
+    
+    drho_t = b * Noise[1] 
+    drho_t = zaxpy(Lb, drho_t, n, Noise[2])
+    xx0 = (drho_t + a * dt) + rho_t #starting vector for the linear solver (Milstein prediction)
+    drho_t = zaxpy(a, drho_t, n, Noise[0])
+    
+    # new terms: 
+    drho_t = zaxpy(_rhs_rho_deterministic(L, b, t, dt, args, td[0]), drho_t, n, Noise[3]) #ba' (dZ - 0.5 dW dt)
+    #A[0] * a - TrAa * rho_t - e0 * a - TrAb * b:
+    f = A[0] * a
+    f = zaxpy(rho_t, f, n, -TrAa)
+    f = zaxpy(a, f, n, -e0)
+    f = zaxpy(b, f, n, -TrAb)
+    drho_t = zaxpy(f, drho_t, n, Noise[4]) #ab' (dW dt - dZ)  
+    #A[0] * Lb - TrALb * rho_t - (2 * TrAb) * b - e0 * Lb:
+    g = A[0] * Lb
+    g = zaxpy(rho_t, g, n, -TrALb)
+    g = zaxpy(b, g, n, -2 * TrAb)
+    g = zaxpy(Lb, g, n, -e0)
+    drho_t = zaxpy(g, drho_t, n, Noise[5])  #bb'bb    
+    drho_t += rho_t
+
+    v, check = sp.linalg.bicgstab(B, drho_t, x0 = xx0, tol=args['tol']) 
+
+    return v
+
+
+def _generate_A_ops_taylor(sc_ops, L, dt):
     """
     pre-compute superoperator operator combinations that are commonly needed
     when evaluating the RHS of stochastic master equations
+    for Tayor-1.5 expicit and implicit solver
     """
-    L = liouvillian(H,c_ops=c_ops).data
-    A_len = len(sc)
-    temp = [spre(c).data + spost(c.dag()).data for c in sc]
-    tempL = (L + np.sum([lindblad_dissipator(c, data_only=True) for c in sc],
-                        axis=0)) # Lagrangian
+    out = [[spre(sc).data + spost(sc.dag()).data] for sc in sc_ops] #for H[sc_ops]
 
-    out = []
-    out += temp
-    out += [tempL]
+    return out
 
-    out1 = [out]
-    # the following hack is required for compatibility with old A_ops
-    out1 += [[] for n in range(A_len - 1)]
-
-    return L, out1
+def _generate_noise_Taylor_15(N_store, N_substeps, d2_len, n, dt):
+    """
+    generate noise terms for the strong Taylor 1.5 scheme
+    """
+    U1 = np.random.randn(N_store, N_substeps, d2_len) 
+    U2 = np.random.randn(N_store, N_substeps, d2_len) 
+    dW = U1 * np.sqrt(dt) 
+    dZ = 0.5 * dt**(3./2) * (U1 + 1./np.sqrt(3) * U2) 
+    
+    return np.dstack((dW, dZ))
+#
+#   Preparation of operator for the fast version
+#
 
 def _generate_A_ops_Euler(H, c_ops, sc_ops, dt):
     """
