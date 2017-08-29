@@ -1700,7 +1700,6 @@ def _rhs_milstein(H, vec_t, t, dt, sc_ops, dW, d1, d2, args, td):
 def _rhs_platen(H, vec_t, t, dt, sc_ops, dW, d1, d2, args, td):
     """
     Platen rhs function for both master eq and schrodinger eq.
-
     dV = -iH* (V+Vt)/2 * dt + (d1(V)+d1(Vt))/2 * dt
          + (2*d2_i(V)+d2_i(V+)+d2_i(V-))/4 * dW_i
          + (d2_i(V+)-d2_i(V-))/4 * (dW_i**2 -dt) * dt**(-.5)
@@ -1758,10 +1757,13 @@ def _rhs_rho_taylor_15_one(L, rho_t, t, dt, A, ddW, d1, d2, args, td):
     
     # Milstein terms:
     Liv[0] = _rhs_rho_deterministic(L, rho_t, t, dt, args, td[0]) #a
-    e0 = cy_expect_rho_vec(A[0], rho_t, 1)
-    #b = A[0] * rho_t - e0 * rho_t:
-    Liv[1] = A[0] * rho_t 
-    Liv[1] = zaxpy(rho_t, Liv[1], n, -e0)
+    e0 = cy_expect_rho_vec(A[0], rho_t, 1)    
+    #Zaxpy doesn't detect numerical overflow 
+    #Here Phython will complain about the oveflow 
+    #this helps to detect too large time-step
+    Liv[1] = A[0] * rho_t - e0 * rho_t 
+    #Liv[1] = A[0] * rho_t 
+    #Liv[1] = zaxpy(rho_t, Liv[1], n, -e0)
     TrAb = cy_expect_rho_vec(A[0], Liv[1], 1) 
     #A[0] * Liv[1] - TrAb * rho_t - e0 * Liv[1]:
     Liv[2] = A[0] * Liv[1] 
