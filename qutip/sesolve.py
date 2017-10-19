@@ -43,7 +43,8 @@ import numpy as np
 import scipy.integrate
 from scipy.linalg import norm
 import qutip.settings as qset
-from qutip.qobj import Qobj, isket
+from qutip.qobj import Qobj, isket, isoper, issuper
+from qutip.superoperator import vec2mat
 from qutip.rhs_generate import rhs_generate
 from qutip.solver import Result, Options, config, _solver_safety_check
 from qutip.rhs_generate import _td_format_check, _td_wrap_array_str
@@ -55,6 +56,7 @@ from qutip.cy.spmatfuncs import (cy_expect_psi, cy_ode_rhs,
                                  spmvpy_csr)
 from qutip.cy.codegen import Codegen
 from qutip.cy.utilities import _cython_build_cleanup
+from qutip.cy.spconvert import dense2D_to_fastcsr_fmode
 
 from qutip.ui.progressbar import BaseProgressBar
 from qutip.cy.openmp.utilities import check_use_openmp, openmp_components
@@ -297,22 +299,29 @@ def _sesolve_const(H, psi0, tlist, e_ops, args, opt, progress_bar):
     if debug:
         print(inspect.stack()[0][3])
 
-    if not isket(psi0):
-        raise TypeError("psi0 must be a ket")
+    # if not isket(psi0):
+    #     raise TypeError("psi0 must be a ket")
+
+    if issuper(psi0):
+        raise TypeError("psi0 must be a ket or oper")
 
     #
     # setup integrator.
     #
-    initial_vector = psi0.full().ravel()
+    initial_vector = psi0.full().ravel('F')
     L = -1.0j * H
     
-    if opt.use_openmp and L.data.nnz >= qset.openmp_thresh:
-        r = scipy.integrate.ode(cy_ode_rhs_openmp)
-        r.set_f_params(L.data.data, L.data.indices, L.data.indptr, 
-                        opt.openmp_threads)
+    if isoper(psi0):
+        r = scipy.integrate.ode(_ode_oper_func)
+        r.set_f_params(L.data)
     else:
-        r = scipy.integrate.ode(cy_ode_rhs)
-        r.set_f_params(L.data.data, L.data.indices, L.data.indptr)
+        if opt.use_openmp and L.data.nnz >= qset.openmp_thresh:
+            r = scipy.integrate.ode(cy_ode_rhs_openmp)
+            r.set_f_params(L.data.data, L.data.indices, L.data.indptr, 
+                            opt.openmp_threads)
+        else:
+            r = scipy.integrate.ode(cy_ode_rhs)
+            r.set_f_params(L.data.data, L.data.indices, L.data.indptr)
     r.set_integrator('zvode', method=opt.method, order=opt.order,
                      atol=opt.atol, rtol=opt.rtol, nsteps=opt.nsteps,
                      first_step=opt.first_step, min_step=opt.min_step,
@@ -332,6 +341,12 @@ def _sesolve_const(H, psi0, tlist, e_ops, args, opt, progress_bar):
 #
 def _ode_psi_func(t, psi, H):
     return H * psi
+#
+# Evaluate d E(t)/dt for E an -operator
+#
+def _ode_oper_func(t, y, data):
+    ym = vec2mat(y)
+    return (data*ym).ravel('F')
 
 
 # -----------------------------------------------------------------------------
@@ -683,6 +698,7 @@ def _generic_ode_solve(r, psi0, tlist, e_ops, opt, progress_bar, dims=None):
     #
     progress_bar.start(n_tsteps)
 
+    psi = Qobj(psi0)
     dt = np.diff(tlist)
     for t_idx, t in enumerate(tlist):
         progress_bar.update(t_idx)
@@ -697,7 +713,11 @@ def _generic_ode_solve(r, psi0, tlist, e_ops, opt, progress_bar, dims=None):
             r.set_initial_value(data, r.t)
 
         if opt.store_states:
-            output.states.append(Qobj(r.y, dims=dims))
+            if isoper(psi):
+                psi.data = dense2D_to_fastcsr_fmode(vec2mat(r.y), psi.shape[0], psi.shape[1])
+            else:
+                psi = r.y
+            output.states.append(Qobj(psi, dims=dims))
 
         if expt_callback:
             # use callback method
